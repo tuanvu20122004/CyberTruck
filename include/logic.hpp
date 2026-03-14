@@ -6,6 +6,7 @@
 #include "communication.hpp"
 #include "logger.hpp"
 #include "Trans_UDP.hpp"
+#include "LaneChangePlanner.hpp"
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
@@ -22,6 +23,7 @@ private:
     MpcController  mpc; 
     Communication  comm;  
     Trans_UDP      udp_send; 
+    LaneChangePlanner planner;
     //Trans_UDP      udp_send1; 
     //Logger         logger; 
     //Logger         logger1;

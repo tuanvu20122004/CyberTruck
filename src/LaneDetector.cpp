@@ -286,7 +286,22 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
         centerline = computeCenterline(left_coeffs, right_coeffs, left_ok, right_ok, bird_eye_view);
         has_valid_lane_ = (centerline.size() >= 3);
     }
+    // ===== Lưu thông tin cho planner =====
+    left_coeffs_ = left_coeffs;
+    right_coeffs_ = right_coeffs;
+    has_left_lane_ = left_ok;
+    has_right_lane_ = right_ok;
 
+    if (left_ok && right_ok) {
+        float y_ref = static_cast<float>(height - 1);
+        float x_left = evalX(left_coeffs, y_ref);
+        float x_right = evalX(right_coeffs, y_ref);
+        float lane_width = std::fabs(x_right - x_left);
+
+        if (lane_width > 80.0f && lane_width < 500.0f) {
+            lane_width_px_ = lane_width;
+        }
+    }
 }
 
 

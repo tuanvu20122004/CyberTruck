@@ -58,22 +58,16 @@ void Logic::run()
 
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
-                latest_frame = detector.getFrameResize();
+                latest_frame = detector.getFrameResize().clone();
             }
-            // Gửi frame gốc sang laptop để calib
-            #if 0
-            if (!frame.empty())
-            {
-                udp_send.sendFrame(frame, 80);
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            }
-            #endif
-            // Gửi frame đã resize sang laptop để xử lí yolo
-            if(!latest_frame.empty())
+
+            // Gửi frame đã resize sang laptop để xử lí YOLO
+            if (!latest_frame.empty())
             {
                 udp_send.sendFrame(latest_frame, 80);
                 std::this_thread::sleep_for(std::chrono::milliseconds(40));
             }
+
             int key = cv::waitKey(1);
 
             if (key == 27 || key == 'q' || key == 'Q')
@@ -97,7 +91,7 @@ void Logic::run()
                 std::lock_guard<std::mutex> lock(frame_mutex);
 
                 if (!latest_frame.empty())
-                    frame_local = latest_frame;
+                    frame_local = latest_frame.clone();
                 else
                     frame_local.release();
             }
@@ -109,20 +103,38 @@ void Logic::run()
             }
 
             detector.processFrame(frame_local);
-            std::vector<cv::Point> centerline = detector.getCenterline();
-            cv::Mat birdEyeView = detector.getBirdEyeView();
-            MpcState state = mpc.computeMpcParameters(centerline, birdEyeView);
 
-            // Gửi ảnh BEV sang laptop de calibrate MPC
-            // if (!birdEyeView.empty())
-            // {
-            //     udp_send.sendFrame(birdEyeView, 80);
-            //     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            // }
+            std::vector<cv::Point> base_centerline = detector.getCenterline();
+            cv::Mat birdEyeView = detector.getBirdEyeView();
+            // MPC tính toán và Planner tạo target centerline để MPC bám theo
+            #if 0
+            if(!birdEyeView.empty())
+            {
+                udp_send.sendFrame(birdEyeView, 80);
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            }
+            #endif
 
             // Nhận khoảng cách từ laptop
             udp_send.receiveDistance();
             float distance = udp_send.getDistance();
+
+            // Planner tạo target centerline để MPC bám
+            std::vector<cv::Point> target_centerline = planner.update(
+                base_centerline,
+                detector.getLeftCoeffs(),
+                detector.getRightCoeffs(),
+                detector.hasLeftLane(),
+                detector.hasRightLane(),
+                detector.getLaneWidthPx(),
+                detector.left_type,
+                detector.right_type,
+                distance,
+                birdEyeView.cols,
+                birdEyeView.rows
+            );
+
+            MpcState state = mpc.computeMpcParameters(target_centerline, birdEyeView);
 
             auto now = std::chrono::steady_clock::now();
 
@@ -141,15 +153,23 @@ void Logic::run()
 
                     int servo = static_cast<int>(std::lround(97.0f + steering));
 
-                    // Safety stop:
-                    // chỉ dừng khi có distance hợp lệ và nhỏ hơn ngưỡng
+                    // Speed logic:
+                    // - planner tự kích hoạt đổi làn khi distance < 0.3
+                    // - chỉ stop cứng nếu quá gần
                     float velocity_cmd = desired_velocity;
 
-                    if (distance > 0.0f && distance < 12.0f)
+                    if (distance > 0.0f && distance < 0.15f)
                     {
                         velocity_cmd = 0.0f;
+                        std::cout << "[SAFETY] STOP - distance = " << distance << " m" << std::endl;
                     }
+
                     comm.sendCommands(velocity_cmd, servo);
+
+                    std::cout << "[CTRL] distance=" << distance
+                              << " velocity=" << velocity_cmd
+                              << " servo=" << servo
+                              << std::endl;
                 }
             }
         }
