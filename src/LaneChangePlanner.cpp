@@ -7,7 +7,7 @@
 LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       progress_(0.0f),
-      trigger_distance_(0.3f),
+      trigger_distance_(1.0f),
       change_rate_(0.08f)
 {
 }

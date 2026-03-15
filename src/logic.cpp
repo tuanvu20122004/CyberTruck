@@ -107,17 +107,14 @@ void Logic::run()
             std::vector<cv::Point> base_centerline = detector.getCenterline();
             cv::Mat birdEyeView = detector.getBirdEyeView();
             // MPC tính toán và Planner tạo target centerline để MPC bám theo
-            #if 0
-            if(!birdEyeView.empty())
-            {
-                udp_send.sendFrame(birdEyeView, 80);
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            }
-            #endif
 
             // Nhận khoảng cách từ laptop
             udp_send.receiveDistance();
             float distance = udp_send.getDistance();
+
+            // nếu ko có bird_eye_view thì dùng frame_local
+            int planner_width  = !birdEyeView.empty() ? birdEyeView.cols : frame_local.cols;
+            int planner_height = !birdEyeView.empty() ? birdEyeView.rows : frame_local.rows;
 
             // Planner tạo target centerline để MPC bám
             std::vector<cv::Point> target_centerline = planner.update(
@@ -134,11 +131,26 @@ void Logic::run()
                 birdEyeView.rows
             );
 
+            if (target_centerline.size() < 3)
+                target_centerline = base_centerline;
+            
+
+            // debug target centerline và base centerline
+            #if 0
+            cv::Mat debug_view = birdEyeView.clone();
+            drawPolyline(debug_view, target_centerline, cv::Scalar(0, 0, 255));    // đỏ
+            if(!birdEyeView.empty())
+            {
+                udp_send.sendFrame(birdEyeView, 80);
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            }
+            #endif
+
             MpcState state = mpc.computeMpcParameters(target_centerline, birdEyeView);
 
             auto now = std::chrono::steady_clock::now();
 
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 100)
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 50)
             {
                 last_send = now;
 

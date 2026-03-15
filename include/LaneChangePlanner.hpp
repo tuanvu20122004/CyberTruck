@@ -47,7 +47,7 @@ private:
     float trigger_distance_;
     float change_rate_;
 
-    std::vector<cv::Point> last_target_line_;
+    std::vector<cv::Point> last_target_line_; // state dashed_lane nhỡ bị mất trong vài frame
 
     std::vector<cv::Point> buildCenterlineFromBoundary(
         const cv::Vec3f& coeff,
