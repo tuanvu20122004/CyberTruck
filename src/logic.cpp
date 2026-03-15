@@ -158,11 +158,11 @@ void Logic::run()
                     // - chỉ stop cứng nếu quá gần
                     float velocity_cmd = desired_velocity;
 
-                    if (distance > 0.0f && distance < 0.15f)
-                    {
-                        velocity_cmd = 0.0f;
-                        std::cout << "[SAFETY] STOP - distance = " << distance << " m" << std::endl;
-                    }
+                    // if (distance > 0.0f && distance < 0.15f)
+                    // {
+                    //     velocity_cmd = 0.0f;
+                    //     std::cout << "[SAFETY] STOP - distance = " << distance << " m" << std::endl;
+                    // }
 
                     comm.sendCommands(velocity_cmd, servo);
 

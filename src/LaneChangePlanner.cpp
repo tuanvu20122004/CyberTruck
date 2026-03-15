@@ -78,8 +78,8 @@ std::vector<cv::Point> LaneChangePlanner::update(
         return base_centerline;
 
     float lane_width = lane_width_px;
-    if (lane_width < 80.0f || lane_width > 500.0f)
-        lane_width = 200.0f;
+    if (lane_width < 300.0f || lane_width > 500.0f)
+        lane_width = 400.0f;
 
     std::vector<cv::Point> left_target;
     std::vector<cv::Point> right_target;

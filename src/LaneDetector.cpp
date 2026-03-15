@@ -508,10 +508,14 @@ std::vector<cv::Point> LaneDetector::computeCenterline(cv::Vec3f coeff_left,
         }
     }
 
-    float current_laneW = 600.0f;
+    float current_laneW;
     if(laneW_avg < 395.0f || laneW_avg > 405.0f) 
     {
         current_laneW = LANE_WIDTH_PX;
+    }
+    else
+    {
+        current_laneW = laneW_avg;
     }
 
     for (int y = 0; y < outImg.rows; y += 10) {
