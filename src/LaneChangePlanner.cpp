@@ -8,8 +8,11 @@ LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       progress_(0.0f),
       trigger_distance_(1.0f),
-      change_rate_(0.08f)
+      min_progress_step_(0.02f),
+      max_progress_step_(0.15f)
 {
+    State_change_line.type_change = DONT_CHANGE;
+    State_change_line.first_access = 0;
 }
 
 float LaneChangePlanner::smoothStep(float x)
@@ -86,11 +89,15 @@ std::vector<cv::Point> LaneChangePlanner::chooseDashedTarget(
     const bool has_right_target = right_target.size() >= 3;
 
     if (has_left_target && !has_right_target)
+    {
         return left_target;
+    }
+        
 
     if (!has_left_target && has_right_target)
+    {
         return right_target;
-
+    }
     if (!has_left_target && !has_right_target)
         return {};
 
@@ -116,6 +123,25 @@ std::vector<cv::Point> LaneChangePlanner::chooseDashedTarget(
 
     return (left_dx >= right_dx) ? left_target : right_target;
 }
+
+float LaneChangePlanner::computeProgressStep(float obstacle_distance) const
+{
+    // nếu distance không hợp lệ thì tăng tối thiểu
+    if (obstacle_distance <= 0.0f)
+        return min_progress_step_;
+
+    float d = std::clamp(obstacle_distance, 0.0f, trigger_distance_);
+
+    float urgency = (trigger_distance_ - d) / trigger_distance_;
+    urgency = std::clamp(urgency, 0.0f, 1.0f);
+
+    // phi tuyến: càng gần thì step tăng nhanh hơn
+    urgency = urgency * urgency;
+
+    return min_progress_step_ +
+           urgency * (max_progress_step_ - min_progress_step_);
+}
+
 
 std::vector<cv::Point> LaneChangePlanner::update(
     const std::vector<cv::Point>& base_centerline,
@@ -145,23 +171,50 @@ std::vector<cv::Point> LaneChangePlanner::update(
     // Nếu lane bên trái là nét đứt, target centerline sẽ nằm về phía trái của biên trái
     if (has_left_lane && left_type == LaneLineType::DASHED)
     {
-        left_target = buildCenterlineFromBoundary(
-            left_coeff,
-            -0.5f * lane_width,
-            img_width,
-            img_height
-        );
+        if (State_change_line.type_change != CHANGE_RIGHT)
+        {
+            left_target = buildCenterlineFromBoundary(
+                left_coeff,
+                -0.5f * lane_width,
+                img_width,
+                img_height
+            );            
+        }
+        else
+        {
+            left_target = buildCenterlineFromBoundary(
+                left_coeff,
+                +0.5f * lane_width,
+                img_width,
+                img_height
+            );  
+        }
+
+
     }
 
     // Nếu lane bên phải là nét đứt, target centerline sẽ nằm về phía phải của biên phải
     if (has_right_lane && right_type == LaneLineType::DASHED)
     {
-        right_target = buildCenterlineFromBoundary(
-            right_coeff,
-            +0.5f * lane_width,
-            img_width,
-            img_height
-        );
+        if (State_change_line.type_change != CHANGE_LEFT)
+        {
+            right_target = buildCenterlineFromBoundary(
+                right_coeff,
+                +0.5f * lane_width,
+                img_width,
+                img_height
+            );         
+        }
+        else
+        {
+            right_target = buildCenterlineFromBoundary(
+                right_coeff,
+                -0.5f * lane_width,
+                img_width,
+                img_height
+            );         
+        }
+
     }
 
     const bool both_lanes_visible = has_left_lane && has_right_lane;
@@ -180,8 +233,31 @@ std::vector<cv::Point> LaneChangePlanner::update(
             state_ = PlannerState::CHANGE_USING_DASHED;
             progress_ = 0.0f;
             last_target_line_ = chooseDashedTarget(left_target, right_target, base_centerline);
+           
+            if (State_change_line.first_access == 0)
+            {
+                if (!left_target.empty() && right_target.empty())
+                {
+                    State_change_line.type_change = CHANGE_LEFT;
+                }
+                else if (left_target.empty() && !right_target.empty())
+                {
+                    State_change_line.type_change = CHANGE_RIGHT;
+                }
+                else if (!left_target.empty() && !right_target.empty())
+                {
+                    float dx_left  = std::fabs(meanX(last_target_line_) - meanX(left_target));
+                    float dx_right = std::fabs(meanX(last_target_line_) - meanX(right_target));
 
-            std::cout << "[PLANNER] CHANGE_USING_DASHED start\n";
+                    State_change_line.type_change = (dx_left < dx_right) ? CHANGE_LEFT : CHANGE_RIGHT;
+                }
+                else
+                {
+                    State_change_line.type_change = DONT_CHANGE;
+                }
+            }
+            std::cout << "[PLANNER] CHANGE_USING_DASHED start, distance="
+                      << obstacle_distance << "\n";
         }
 
         return base_centerline;
@@ -191,11 +267,16 @@ std::vector<cv::Point> LaneChangePlanner::update(
     {
         // Khi đã nhìn thấy đủ 2 lane thì kết thúc chuyển làn
         // và quay về bám lane chuẩn.
-        if (both_lanes_visible)
+        if ((obstacle_distance < 0.0f ||
+            obstacle_distance > trigger_distance_) &&
+            both_lanes_visible &&
+            progress_ > 0.75f)
         {
             state_ = PlannerState::FOLLOW_LANE;
             progress_ = 0.0f;
             last_target_line_.clear();
+            State_change_line.type_change = DONT_CHANGE;
+            State_change_line.first_access = 0;
             std::cout << "[PLANNER] FOLLOW_LANE\n";
             return base_centerline;
         }
@@ -221,8 +302,14 @@ std::vector<cv::Point> LaneChangePlanner::update(
             return base_centerline;
         }
 
-        progress_ += change_rate_;
+        float step = computeProgressStep(obstacle_distance);
+        progress_ += step;
         progress_ = std::clamp(progress_, 0.0f, 1.0f);
+
+        std::cout << "[PLANNER] distance=" << obstacle_distance
+                  << " step=" << step
+                  << " progress=" << progress_
+                  << "\n";
 
         return blendCenterlines(base_centerline, dynamic_target, progress_);
     }

@@ -4,15 +4,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include "LaneDetector.hpp"
-#if 0
-enum class PlannerState {
-    KEEP_LANE = 0,
-    CHANGE_LEFT,
-    FOLLOW_LEFT_LANE,
-    CHANGE_RIGHT,
-    FOLLOW_RIGHT_LANE
-};
-#endif
+
 
 enum class PlannerState
 {
@@ -20,6 +12,20 @@ enum class PlannerState
     CHANGE_USING_DASHED,
     FOLLOW_LANE
 };
+
+enum Type_Change_t
+{
+    DONT_CHANGE = 0,
+    CHANGE_LEFT,
+    CHANGE_RIGHT,
+};
+typedef struct
+{
+    Type_Change_t type_change;
+    int first_access = 0;
+    /* data */
+} State_Change_Lane_t;
+
 
 class LaneChangePlanner {
 public:
@@ -42,10 +48,14 @@ public:
     PlannerState getState() const { return state_; }
 
 private:
+    State_Change_Lane_t State_change_line;
     PlannerState state_;
     float progress_;
     float trigger_distance_;
-    float change_rate_;
+    // bước tăng progress mỗi lần update
+    float min_progress_step_;
+    float max_progress_step_;
+
 
     std::vector<cv::Point> last_target_line_; // state dashed_lane nhỡ bị mất trong vài frame
 
@@ -69,6 +79,8 @@ private:
         const std::vector<cv::Point>& right_target,
         const std::vector<cv::Point>& base_centerline
     ) const;
+
+    float computeProgressStep(float obstacle_distance) const;
 
     float smoothStep(float x);
 };
