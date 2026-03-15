@@ -136,7 +136,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         }
 
         progress_ += change_rate_;
-        if (progress_ >= 1.0f)
+        if (progress_ >= 100.0f)
         {
             progress_ = 1.0f;
             state_ = PlannerState::FOLLOW_LEFT_LANE;
@@ -156,7 +156,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         }
 
         progress_ += change_rate_;
-        if (progress_ >= 1.0f)
+        if (progress_ >= 100.0f)
         {
             progress_ = 1.0f;
             state_ = PlannerState::FOLLOW_RIGHT_LANE;
