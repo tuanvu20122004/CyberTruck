@@ -1,4 +1,5 @@
 #include "LaneChangePlanner.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -17,6 +18,17 @@ float LaneChangePlanner::smoothStep(float x)
     return x * x * (3.0f - 2.0f * x);
 }
 
+float LaneChangePlanner::meanX(const std::vector<cv::Point>& line)
+{
+    if (line.empty()) return 0.0f;
+
+    double sum = 0.0;
+    for (const auto& p : line)
+        sum += p.x;
+
+    return static_cast<float>(sum / static_cast<double>(line.size()));
+}
+
 std::vector<cv::Point> LaneChangePlanner::buildCenterlineFromBoundary(
     const cv::Vec3f& coeff,
     float offset_px,
@@ -30,7 +42,7 @@ std::vector<cv::Point> LaneChangePlanner::buildCenterlineFromBoundary(
     for (int y = 0; y < img_height; y += 10)
     {
         float x = coeff[0] * y * y + coeff[1] * y + coeff[2] + offset_px;
-        int xi = std::clamp((int)std::round(x), 0, img_width - 1);
+        int xi = std::clamp(static_cast<int>(std::round(x)), 0, img_width - 1);
         line.emplace_back(xi, y);
     }
 
@@ -43,21 +55,66 @@ std::vector<cv::Point> LaneChangePlanner::blendCenterlines(
     float alpha
 )
 {
-    std::vector<cv::Point> out;
-    size_t n = std::min(from_line.size(), to_line.size());
-    if (n < 3) return from_line;
+    if (from_line.size() < 3) return from_line;
+    if (to_line.size() < 3)   return from_line;
 
+    size_t n = std::min(from_line.size(), to_line.size());
+    std::vector<cv::Point> out;
     out.reserve(n);
+
     float s = smoothStep(alpha);
 
     for (size_t i = 0; i < n; ++i)
     {
-        int x = (int)std::round((1.0f - s) * from_line[i].x + s * to_line[i].x);
+        int x = static_cast<int>(
+            std::round((1.0f - s) * from_line[i].x + s * to_line[i].x)
+        );
         int y = from_line[i].y;
         out.emplace_back(x, y);
     }
 
     return out;
+}
+
+std::vector<cv::Point> LaneChangePlanner::chooseDashedTarget(
+    const std::vector<cv::Point>& left_target,
+    const std::vector<cv::Point>& right_target,
+    const std::vector<cv::Point>& base_centerline
+) const
+{
+    const bool has_left_target  = left_target.size()  >= 3;
+    const bool has_right_target = right_target.size() >= 3;
+
+    if (has_left_target && !has_right_target)
+        return left_target;
+
+    if (!has_left_target && has_right_target)
+        return right_target;
+
+    if (!has_left_target && !has_right_target)
+        return {};
+
+    // Nếu cả 2 đều là dashed, chọn target gần với target trước đó hơn
+    // để tránh nhảy trái/phải liên tục.
+    if (!last_target_line_.empty())
+    {
+        float last_x  = meanX(last_target_line_);
+        float left_x  = meanX(left_target);
+        float right_x = meanX(right_target);
+
+        float d_left  = std::fabs(left_x - last_x);
+        float d_right = std::fabs(right_x - last_x);
+
+        return (d_left <= d_right) ? left_target : right_target;
+    }
+
+    // Chưa có target trước đó:
+    // chọn target lệch xa hơn so với base_centerline để tạo lane-change rõ ràng.
+    float base_x  = meanX(base_centerline);
+    float left_dx = std::fabs(meanX(left_target) - base_x);
+    float right_dx = std::fabs(meanX(right_target) - base_x);
+
+    return (left_dx >= right_dx) ? left_target : right_target;
 }
 
 std::vector<cv::Point> LaneChangePlanner::update(
@@ -81,9 +138,11 @@ std::vector<cv::Point> LaneChangePlanner::update(
     if (lane_width < 300.0f || lane_width > 500.0f)
         lane_width = 400.0f;
 
+    // Target centerline tạo từ lane nét đứt hiện tại
     std::vector<cv::Point> left_target;
     std::vector<cv::Point> right_target;
 
+    // Nếu lane bên trái là nét đứt, target centerline sẽ nằm về phía trái của biên trái
     if (has_left_lane && left_type == LaneLineType::DASHED)
     {
         left_target = buildCenterlineFromBoundary(
@@ -94,6 +153,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         );
     }
 
+    // Nếu lane bên phải là nét đứt, target centerline sẽ nằm về phía phải của biên phải
     if (has_right_lane && right_type == LaneLineType::DASHED)
     {
         right_target = buildCenterlineFromBoundary(
@@ -104,74 +164,89 @@ std::vector<cv::Point> LaneChangePlanner::update(
         );
     }
 
+    const bool both_lanes_visible = has_left_lane && has_right_lane;
+    const bool any_dashed_visible = !left_target.empty() || !right_target.empty();
+
     switch (state_)
     {
     case PlannerState::KEEP_LANE:
     {
-        if (obstacle_distance > 0.0f && obstacle_distance < trigger_distance_)
+        // Bình thường bám lane hiện tại
+        // Chỉ bắt đầu lane-change khi obstacle đủ gần và có ít nhất 1 lane nét đứt
+        if (obstacle_distance > 0.0f &&
+            obstacle_distance < trigger_distance_ &&
+            any_dashed_visible)
         {
-            if (!left_target.empty())
-            {
-                state_ = PlannerState::CHANGE_LEFT;
-                progress_ = 0.0f;
-                std::cout << "[PLANNER] CHANGE_LEFT start\n";
-            }
-            else if (!right_target.empty())
-            {
-                state_ = PlannerState::CHANGE_RIGHT;
-                progress_ = 0.0f;
-                std::cout << "[PLANNER] CHANGE_RIGHT start\n";
-            }
+            state_ = PlannerState::CHANGE_USING_DASHED;
+            progress_ = 0.0f;
+            last_target_line_ = chooseDashedTarget(left_target, right_target, base_centerline);
+
+            std::cout << "[PLANNER] CHANGE_USING_DASHED start\n";
         }
+
         return base_centerline;
     }
 
-    case PlannerState::CHANGE_LEFT:
+    case PlannerState::CHANGE_USING_DASHED:
     {
-        if (left_target.empty())
+        // Khi đã nhìn thấy đủ 2 lane thì kết thúc chuyển làn
+        // và quay về bám lane chuẩn.
+        if (both_lanes_visible)
         {
-            state_ = PlannerState::KEEP_LANE;
+            state_ = PlannerState::FOLLOW_LANE;
             progress_ = 0.0f;
+            last_target_line_.clear();
+            std::cout << "[PLANNER] FOLLOW_LANE\n";
+            return base_centerline;
+        }
+
+        // Trong lúc chuyển làn:
+        // dashed có thể đổi từ trái sang phải hoặc ngược lại,
+        // nên mỗi frame chọn lại target theo dashed hiện tại.
+        std::vector<cv::Point> dynamic_target =
+            chooseDashedTarget(left_target, right_target, base_centerline);
+
+        // Nếu mất dashed tạm thời thì giữ target cũ để xe không bị hụt lái
+        if (dynamic_target.size() >= 3)
+        {
+            last_target_line_ = dynamic_target;
+        }
+        else if (last_target_line_.size() >= 3)
+        {
+            dynamic_target = last_target_line_;
+        }
+        else
+        {
+            // Không có gì để bám thì cứ giữ base_centerline
             return base_centerline;
         }
 
         progress_ += change_rate_;
-        if (progress_ >= 100.0f)
-        {
-            progress_ = 1.0f;
-            state_ = PlannerState::FOLLOW_LEFT_LANE;
-            std::cout << "[PLANNER] FOLLOW_LEFT_LANE\n";
-        }
+        progress_ = std::clamp(progress_, 0.0f, 1.0f);
 
-        return blendCenterlines(base_centerline, left_target, progress_);
+        return blendCenterlines(base_centerline, dynamic_target, progress_);
     }
 
-    case PlannerState::CHANGE_RIGHT:
+    case PlannerState::FOLLOW_LANE:
     {
-        if (right_target.empty())
+        // Khi đã thấy 2 lane -> bám lane bình thường bằng base_centerline
+        // Nếu sau đó obstacle lại xuất hiện gần và có dashed,
+        // cho phép bắt đầu một lần lane-change mới.
+        if (obstacle_distance > 0.0f &&
+            obstacle_distance < trigger_distance_ &&
+            any_dashed_visible)
         {
-            state_ = PlannerState::KEEP_LANE;
+            state_ = PlannerState::CHANGE_USING_DASHED;
             progress_ = 0.0f;
-            return base_centerline;
+            last_target_line_ = chooseDashedTarget(left_target, right_target, base_centerline);
+
+            std::cout << "[PLANNER] CHANGE_USING_DASHED restart\n";
+            return blendCenterlines(base_centerline, last_target_line_, progress_);
         }
 
-        progress_ += change_rate_;
-        if (progress_ >= 100.0f)
-        {
-            progress_ = 1.0f;
-            state_ = PlannerState::FOLLOW_RIGHT_LANE;
-            std::cout << "[PLANNER] FOLLOW_RIGHT_LANE\n";
-        }
-
-        return blendCenterlines(base_centerline, right_target, progress_);
+        return base_centerline;
     }
 
-    case PlannerState::FOLLOW_LEFT_LANE:
-        //return left_target.empty() ? base_centerline : left_target;
-        return base_centerline;
-    case PlannerState::FOLLOW_RIGHT_LANE:
-        //return right_target.empty() ? base_centerline : right_target;
-        return base_centerline;
     default:
         return base_centerline;
     }

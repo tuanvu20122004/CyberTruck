@@ -4,13 +4,21 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include "LaneDetector.hpp"
-
+#if 0
 enum class PlannerState {
     KEEP_LANE = 0,
     CHANGE_LEFT,
     FOLLOW_LEFT_LANE,
     CHANGE_RIGHT,
     FOLLOW_RIGHT_LANE
+};
+#endif
+
+enum class PlannerState
+{
+    KEEP_LANE = 0,
+    CHANGE_USING_DASHED,
+    FOLLOW_LANE
 };
 
 class LaneChangePlanner {
@@ -39,6 +47,8 @@ private:
     float trigger_distance_;
     float change_rate_;
 
+    std::vector<cv::Point> last_target_line_;
+
     std::vector<cv::Point> buildCenterlineFromBoundary(
         const cv::Vec3f& coeff,
         float offset_px,
@@ -51,6 +61,14 @@ private:
         const std::vector<cv::Point>& to_line,
         float alpha
     );
+
+    static float meanX(const std::vector<cv::Point>& line);
+
+    std::vector<cv::Point> chooseDashedTarget(
+        const std::vector<cv::Point>& left_target,
+        const std::vector<cv::Point>& right_target,
+        const std::vector<cv::Point>& base_centerline
+    ) const;
 
     float smoothStep(float x);
 };
