@@ -89,17 +89,15 @@ std::vector<cv::Point> LaneChangePlanner::chooseDashedTarget(
     const bool has_right_target = right_target.size() >= 3;
 
     if (has_left_target && !has_right_target)
-    {
         return left_target;
-    }
-        
 
     if (!has_left_target && has_right_target)
-    {
         return right_target;
-    }
+    
+
     if (!has_left_target && !has_right_target)
         return {};
+
 
     // Nếu cả 2 đều là dashed, chọn target gần với target trước đó hơn
     // để tránh nhảy trái/phải liên tục.
@@ -205,6 +203,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
                 img_height
             );         
         }
+
         else
         {
             right_target = buildCenterlineFromBoundary(
@@ -214,7 +213,6 @@ std::vector<cv::Point> LaneChangePlanner::update(
                 img_height
             );         
         }
-
     }
 
     const bool both_lanes_visible = has_left_lane && has_right_lane;
@@ -236,14 +234,18 @@ std::vector<cv::Point> LaneChangePlanner::update(
            
             if (State_change_line.first_access == 0)
             {
+                State_change_line.first_access == 1;
+
                 if (!left_target.empty() && right_target.empty())
                 {
                     State_change_line.type_change = CHANGE_LEFT;
                 }
+
                 else if (left_target.empty() && !right_target.empty())
                 {
                     State_change_line.type_change = CHANGE_RIGHT;
                 }
+
                 else if (!left_target.empty() && !right_target.empty())
                 {
                     float dx_left  = std::fabs(meanX(last_target_line_) - meanX(left_target));
@@ -251,6 +253,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
 
                     State_change_line.type_change = (dx_left < dx_right) ? CHANGE_LEFT : CHANGE_RIGHT;
                 }
+
                 else
                 {
                     State_change_line.type_change = DONT_CHANGE;
@@ -267,7 +270,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
     {
         // Khi đã nhìn thấy đủ 2 lane thì kết thúc chuyển làn
         // và quay về bám lane chuẩn.
-        if ((obstacle_distance < 0.0f ||
+        if ((obstacle_distance < 0.4f ||
             obstacle_distance > trigger_distance_) &&
             both_lanes_visible &&
             progress_ > 0.75f)
@@ -284,6 +287,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         // Trong lúc chuyển làn:
         // dashed có thể đổi từ trái sang phải hoặc ngược lại,
         // nên mỗi frame chọn lại target theo dashed hiện tại.
+
         std::vector<cv::Point> dynamic_target =
             chooseDashedTarget(left_target, right_target, base_centerline);
 
@@ -296,6 +300,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         {
             dynamic_target = last_target_line_;
         }
+
         else
         {
             // Không có gì để bám thì cứ giữ base_centerline

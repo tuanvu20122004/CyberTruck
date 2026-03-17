@@ -24,7 +24,7 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_send("192.168.1.108", 9996)
+      udp_send("192.168.1.102", 9996)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -64,7 +64,7 @@ void Logic::run()
             // Gửi frame đã resize sang laptop để xử lí YOLO
             if (!latest_frame.empty())
             {
-                udp_send.sendFrame(latest_frame, 80);
+                udp_send.sendFrame(latest_frame, 90);
                 std::this_thread::sleep_for(std::chrono::milliseconds(40));
             }
 
@@ -108,6 +108,7 @@ void Logic::run()
             cv::Mat birdEyeView = detector.getBirdEyeView();
             // MPC tính toán và Planner tạo target centerline để MPC bám theo
 
+
             // Nhận khoảng cách từ laptop
             udp_send.receiveDistance();
             float distance = udp_send.getDistance();
@@ -127,8 +128,8 @@ void Logic::run()
                 detector.left_type,
                 detector.right_type,
                 distance,
-                birdEyeView.cols,
-                birdEyeView.rows
+                planner_width,
+                planner_height
             );
 
             if (target_centerline.size() < 3)
@@ -158,7 +159,7 @@ void Logic::run()
                 {
                     float steering = mpc.computeSteeringAngle(state, desired_velocity);
 
-                    steering = 0.01f * std::pow(steering, 3) + 1.5f * steering;
+                    steering = 0.6f * std::pow(steering, 3) + 1.5f * steering;
 
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;
