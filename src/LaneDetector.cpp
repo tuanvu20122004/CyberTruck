@@ -63,17 +63,34 @@ bool LaneDetector::getFrame(cv::Mat& frame) {
     std::cout << "Saved pi_raw.jpg" << std::endl;
     saved_raw = 1;
     }
-    
-    cv::Mat undistorted;
+   cv::Mat undistorted;
     cv::Mat cameraMatrix = (cv::Mat_<double>(3,3) <<
         262.08953333143063, 0.0, 330.77574325128484,
         0.0, 263.57901348164575, 250.50298224489268,
         0.0, 0.0, 1.0);
+
     cv::Mat distCoeffs = (cv::Mat_<double>(1,5) <<
         -0.27166331922859776, 0.09924985737514846,
         -0.0002707688044880526, 0.0006724194580262318,
         -0.01935517123682299);
-    cv::undistort(frame, undistorted, cameraMatrix, distCoeffs);
+
+    cv::Rect validROI;
+    cv::Mat newCameraMatrix = cv::getOptimalNewCameraMatrix(
+        cameraMatrix,
+        distCoeffs,
+        frame.size(),
+        0.0,              // 0 = crop mạnh để giảm viền đen, 1 = giữ full FoV
+        frame.size(),
+        &validROI
+    );
+
+    cv::undistort(frame, undistorted, cameraMatrix, distCoeffs, newCameraMatrix);
+
+    // crop vùng hợp lệ
+    if (validROI.width > 0 && validROI.height > 0) {
+        undistorted = undistorted(validROI).clone();
+    }
+
     frame = undistorted.clone();
 
     cv::resize(frame, frame_resize, cv::Size(width, height));
@@ -113,8 +130,9 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
 
     if (!initialized) {
         slidingWindow(mask, left_points, right_points, bird_eye_view, minpix);
-        left_ok  = (left_points.size()  >= 80);
-        right_ok = (right_points.size() >= 80);
+        left_ok  = (left_points.size()  >= 30);
+        right_ok = (right_points.size() >= 30);
+        std :: cout << "left_ok: " << left_ok << " right_ok: " << right_ok << std::endl;
 
         if (left_ok)  left_coeffs  = fitPoly(left_points, bird_eye_view, true);
         if (right_ok) right_coeffs = fitPoly(right_points, bird_eye_view, false);
@@ -316,8 +334,6 @@ cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 
     // =====================================================
     // SOURCE POINTS
-    // Chọn 4 điểm hình thang bám vào 2 lane trong ảnh gốc
-    // Bạn sẽ cần tinh chỉnh nhẹ các số này theo ảnh thực tế
     // =====================================================
     cv::Point2f tl(235.0f, 285.0f);
     cv::Point2f tr(405.0f, 285.0f);
@@ -328,9 +344,8 @@ cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 
     // =====================================================
     // DESTINATION POINTS
-    // Sau warp muốn 2 lane gần song song và nằm cân giữa ảnh
     // =====================================================
-    const float margin_x = 170.0f;
+    const float margin_x = 150.0f;
 
     cv::Point2f dst_tl(margin_x, 0.0f);
     cv::Point2f dst_tr(width - margin_x, 0.0f);
@@ -339,7 +354,7 @@ cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 
     std::vector<cv::Point2f> dst_points = { dst_tl, dst_tr, dst_br, dst_bl };
 
-    // Debug: vẽ tứ giác nguồn trên ảnh gốc
+    // Debug vẽ vùng nguồn
     cv::circle(frame, tl, 5, cv::Scalar(0, 255, 0), -1);
     cv::circle(frame, tr, 5, cv::Scalar(0, 255, 0), -1);
     cv::circle(frame, br, 5, cv::Scalar(0, 0, 255), -1);
@@ -352,9 +367,10 @@ cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 
     cv::Mat M = cv::getPerspectiveTransform(src_points, dst_points);
 
+    cv::Mat warped;
     cv::warpPerspective(
         frame,
-        bird_eye_view,
+        warped,
         M,
         cv::Size(width, height),
         cv::INTER_LINEAR,
@@ -362,6 +378,42 @@ cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
         cv::Scalar(0, 0, 0)
     );
 
+    // =====================================================
+    // AUTO-CROP vùng không đen
+    // =====================================================
+    cv::Mat gray, validMask;
+    cv::cvtColor(warped, gray, cv::COLOR_BGR2GRAY);
+
+    // pixel > 5 coi là hợp lệ
+    cv::threshold(gray, validMask, 5, 255, cv::THRESH_BINARY);
+
+    // đóng/mở nhẹ để mask liền hơn
+    cv::morphologyEx(
+        validMask,
+        validMask,
+        cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 9))
+    );
+
+    std::vector<cv::Point> nz;
+    cv::findNonZero(validMask, nz);
+
+    if (!nz.empty()) {
+        cv::Rect roi = cv::boundingRect(nz);
+
+        // chỉ crop ngang mạnh, giữ gần như full chiều cao
+        int pad_x = 5;
+        roi.x = std::max(0, roi.x + pad_x);
+        roi.width = std::min(warped.cols - roi.x, roi.width - 2 * pad_x);
+
+        if (roi.width > 50 && roi.height > 50) {
+            cv::Mat cropped = warped(roi).clone();
+            cv::resize(cropped, bird_eye_view, cv::Size(width, height));
+            return bird_eye_view;
+        }
+    }
+
+    bird_eye_view = warped.clone();
     return bird_eye_view;
 }
 
@@ -585,7 +637,7 @@ std::vector<cv::Point> LaneDetector::computeCenterline(cv::Vec3f coeff_left,
         cv::putText(outImg, "RIGHT ONLY", {30, 80}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 0, 255}, 2);
     else if (has_left && has_right)
         cv::putText(outImg, "BOTH LANES", {30, 80}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 255, 255}, 2);
-    else
+    else if (!has_left && !has_right)
         cv::putText(outImg, "NO LANE", {30, 80}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 0, 255}, 2);
 
     return centerline; 

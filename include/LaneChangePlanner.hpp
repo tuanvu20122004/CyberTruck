@@ -82,6 +82,8 @@ private:
 
     float computeProgressStep(float obstacle_distance) const;
 
+    float aggressiveBlend(float alpha);
+
     static float smoothStep(float x);
 };
 

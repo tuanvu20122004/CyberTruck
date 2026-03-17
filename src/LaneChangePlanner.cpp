@@ -7,7 +7,7 @@
 LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       progress_(0.0f),
-      trigger_distance_(1.2f),
+      trigger_distance_(1.1f),
       min_progress_step_(0.025f),
       max_progress_step_(0.12f)
 {
@@ -52,6 +52,23 @@ std::vector<cv::Point> LaneChangePlanner::buildCenterlineFromBoundary(
     return line;
 }
 
+float LaneChangePlanner::aggressiveBlend(float alpha)
+{
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+
+    float s = smoothStep(alpha);
+
+    // Từ giữa pha trở đi, hút vào target mạnh hơn
+    if (alpha > 0.45f)
+    {
+        float t = (alpha - 0.45f) / 0.55f; // 0 -> 1
+        t = std::clamp(t, 0.0f, 1.0f);
+        s += 0.22f * t;
+    }
+
+    return std::clamp(s, 0.0f, 1.0f);
+}
+
 std::vector<cv::Point> LaneChangePlanner::blendCenterlines(
     const std::vector<cv::Point>& from_line,
     const std::vector<cv::Point>& to_line,
@@ -65,7 +82,7 @@ std::vector<cv::Point> LaneChangePlanner::blendCenterlines(
     std::vector<cv::Point> out;
     out.reserve(n);
 
-    float s = smoothStep(alpha);
+    float s = aggressiveBlend(alpha);
 
     for (size_t i = 0; i < n; ++i)
     {
@@ -145,7 +162,7 @@ float LaneChangePlanner::computeProgressStep(float obstacle_distance) const
     // progress_=0  -> nhanh hơn
     // progress_=1  -> chậm hơn
     float phase = smoothStep(progress_);
-    float phase_factor = 1.35f - 0.55f * phase;
+    float phase_factor = 1.20f - 0.10f * phase;
 
     float step = base_step * phase_factor;
 
@@ -210,7 +227,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         {
             right_target = buildCenterlineFromBoundary(
                 right_coeff,
-                +0.5f * lane_width,
+                -0.5f * lane_width,
                 img_width,
                 img_height
             );         
@@ -246,7 +263,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
            
             if (State_change_line.first_access == 0)
             {
-                State_change_line.first_access == 1;
+                State_change_line.first_access = 1;
 
                 if (!left_target.empty() && right_target.empty())
                 {
@@ -282,7 +299,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
     {
         // Khi đã nhìn thấy đủ 2 lane thì kết thúc chuyển làn
         // và quay về bám lane chuẩn.
-        if ((obstacle_distance < 0.0f ||
+        if ((obstacle_distance < 0.5f ||
             obstacle_distance > trigger_distance_) &&
             both_lanes_visible &&
             progress_ > 0.6f)
@@ -336,7 +353,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         // Khi đã thấy 2 lane -> bám lane bình thường bằng base_centerline
         // Nếu sau đó obstacle lại xuất hiện gần và có dashed,
         // cho phép bắt đầu một lần lane-change mới.
-        if (obstacle_distance > 0.8f &&
+        if (obstacle_distance > 1.0f &&
             obstacle_distance < trigger_distance_ &&
             any_dashed_visible)
         {
