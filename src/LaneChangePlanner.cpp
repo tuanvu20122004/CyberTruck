@@ -7,9 +7,9 @@
 LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       progress_(0.0f),
-      trigger_distance_(1.0f),
-      min_progress_step_(0.02f),
-      max_progress_step_(0.15f)
+      trigger_distance_(1.2f),
+      min_progress_step_(0.025f),
+      max_progress_step_(0.12f)
 {
     State_change_line.type_change = DONT_CHANGE;
     State_change_line.first_access = 0;
@@ -124,20 +124,32 @@ std::vector<cv::Point> LaneChangePlanner::chooseDashedTarget(
 
 float LaneChangePlanner::computeProgressStep(float obstacle_distance) const
 {
-    // nếu distance không hợp lệ thì tăng tối thiểu
-    if (obstacle_distance <= 0.0f)
-        return min_progress_step_;
+    // 1) Thành phần theo distance
+    float distance_factor = 0.0f;
 
-    float d = std::clamp(obstacle_distance, 0.0f, trigger_distance_);
+    if (obstacle_distance > 0.0f)
+    {
+        float d = std::clamp(obstacle_distance, 0.0f, trigger_distance_);
+        float urgency = (trigger_distance_ - d) / trigger_distance_;
+        urgency = std::clamp(urgency, 0.0f, 1.0f);
 
-    float urgency = (trigger_distance_ - d) / trigger_distance_;
-    urgency = std::clamp(urgency, 0.0f, 1.0f);
+        // Làm phản ứng đầu pha nhạy hơn một chút
+        distance_factor = std::sqrt(urgency);
+    }
 
-    // phi tuyến: càng gần thì step tăng nhanh hơn
-    urgency = urgency * urgency;
+    float base_step =
+        min_progress_step_ +
+        distance_factor * (max_progress_step_ - min_progress_step_);
 
-    return min_progress_step_ +
-           urgency * (max_progress_step_ - min_progress_step_);
+    // 2) Thành phần theo phase của lane-change
+    // progress_=0  -> nhanh hơn
+    // progress_=1  -> chậm hơn
+    float phase = smoothStep(progress_);
+    float phase_factor = 1.35f - 0.55f * phase;
+
+    float step = base_step * phase_factor;
+
+    return std::clamp(step, min_progress_step_, max_progress_step_);
 }
 
 
@@ -262,7 +274,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
             std::cout << "[PLANNER] CHANGE_USING_DASHED start, distance="
                       << obstacle_distance << "\n";
         }
-
+        std::cout << "[PLANNER] KEEP_LANE\n";
         return base_centerline;
     }
 
@@ -270,10 +282,10 @@ std::vector<cv::Point> LaneChangePlanner::update(
     {
         // Khi đã nhìn thấy đủ 2 lane thì kết thúc chuyển làn
         // và quay về bám lane chuẩn.
-        if ((obstacle_distance < 0.4f ||
+        if ((obstacle_distance < 0.0f ||
             obstacle_distance > trigger_distance_) &&
             both_lanes_visible &&
-            progress_ > 0.75f)
+            progress_ > 0.6f)
         {
             state_ = PlannerState::FOLLOW_LANE;
             progress_ = 0.0f;
@@ -324,7 +336,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         // Khi đã thấy 2 lane -> bám lane bình thường bằng base_centerline
         // Nếu sau đó obstacle lại xuất hiện gần và có dashed,
         // cho phép bắt đầu một lần lane-change mới.
-        if (obstacle_distance > 0.0f &&
+        if (obstacle_distance > 0.8f &&
             obstacle_distance < trigger_distance_ &&
             any_dashed_visible)
         {

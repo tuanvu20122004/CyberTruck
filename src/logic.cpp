@@ -23,8 +23,9 @@ void bindToCore(int core_id)
 
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
-      comm("/dev/ttyACM0", 115200),
-      udp_send("192.168.1.102", 9996)
+    comm("/dev/ttyACM0", 115200),
+    udp_yolo("192.168.1.100", 9996, 8888),
+    udp_debug("192.168.1.100", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -48,6 +49,8 @@ void Logic::run()
 
         cv::Mat frame;
 
+        auto last_yolo_send = std::chrono::steady_clock::now();
+
         while (running.load())
         {
             if (!detector.getFrame(frame))
@@ -56,20 +59,23 @@ void Logic::run()
                 continue;
             }
 
+            cv::Mat frame_yolo;
+
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
                 latest_frame = detector.getFrameResize().clone();
+                frame_yolo = latest_frame.clone();
             }
 
-            // Gửi frame đã resize sang laptop để xử lí YOLO
-            if (!latest_frame.empty())
+            auto now = std::chrono::steady_clock::now();
+            if (!frame_yolo.empty() &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_yolo_send).count() >= 50)
             {
-                udp_send.sendFrame(latest_frame, 90);
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                last_yolo_send = now;
+                udp_yolo.sendFrame(frame_yolo, 85);
             }
 
             int key = cv::waitKey(1);
-
             if (key == 27 || key == 'q' || key == 'Q')
             {
                 running.store(false);
@@ -84,6 +90,7 @@ void Logic::run()
 
         cv::Mat frame_local;
         auto last_send = std::chrono::steady_clock::now();
+        auto last_debug_send = std::chrono::steady_clock::now();
 
         while (running.load())
         {
@@ -106,18 +113,21 @@ void Logic::run()
 
             std::vector<cv::Point> base_centerline = detector.getCenterline();
             cv::Mat birdEyeView = detector.getBirdEyeView();
-            // MPC tính toán và Planner tạo target centerline để MPC bám theo
 
+            static float last_valid_distance = -1.0f;
 
-            // Nhận khoảng cách từ laptop
-            udp_send.receiveDistance();
-            float distance = udp_send.getDistance();
+            if (udp_yolo.receiveDistance())
+            {
+                float d = udp_yolo.getDistance();
+                if (d > 0.0f)
+                    last_valid_distance = d;
+            }
 
-            // nếu ko có bird_eye_view thì dùng frame_local
+            float distance = last_valid_distance;
+
             int planner_width  = !birdEyeView.empty() ? birdEyeView.cols : frame_local.cols;
             int planner_height = !birdEyeView.empty() ? birdEyeView.rows : frame_local.rows;
 
-            // Planner tạo target centerline để MPC bám
             std::vector<cv::Point> target_centerline = planner.update(
                 base_centerline,
                 detector.getLeftCoeffs(),
@@ -134,18 +144,19 @@ void Logic::run()
 
             if (target_centerline.size() < 3)
                 target_centerline = base_centerline;
-            
 
-            // debug target centerline và base centerline
-            #if 0
-            cv::Mat debug_view = birdEyeView.clone();
-            drawPolyline(debug_view, target_centerline, cv::Scalar(0, 0, 255));    // đỏ
-            if(!birdEyeView.empty())
+            auto now_debug = std::chrono::steady_clock::now();
+            if (!birdEyeView.empty() &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 100)
             {
-                udp_send.sendFrame(birdEyeView, 80);
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                last_debug_send = now_debug;
+
+                cv::Mat debug_view = birdEyeView.clone();
+                Logger::drawPolyline(debug_view, base_centerline, cv::Scalar(255, 0, 0));
+                Logger::drawPolyline(debug_view, target_centerline, cv::Scalar(0, 0, 255));
+
+                udp_debug.sendFrame(debug_view, 75);
             }
-            #endif
 
             MpcState state = mpc.computeMpcParameters(target_centerline, birdEyeView);
 
@@ -159,35 +170,21 @@ void Logic::run()
                 {
                     float steering = mpc.computeSteeringAngle(state, desired_velocity);
 
-                    steering = 0.6f * std::pow(steering, 3) + 1.5f * steering;
+                    steering = 0.7f * std::pow(steering, 3) + 1.6f * steering;
 
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;
 
                     int servo = static_cast<int>(std::lround(97.0f + steering));
 
-                    // Speed logic:
-                    // - planner tự kích hoạt đổi làn khi distance < 0.3
-                    // - chỉ stop cứng nếu quá gần
                     float velocity_cmd = desired_velocity;
-
-                    // if (distance > 0.0f && distance < 0.15f)
-                    // {
-                    //     velocity_cmd = 0.0f;
-                    //     std::cout << "[SAFETY] STOP - distance = " << distance << " m" << std::endl;
-                    // }
 
                     comm.sendCommands(velocity_cmd, servo);
 
-                    std::cout << "[CTRL] distance=" << distance
-                              << " velocity=" << velocity_cmd
-                              << " servo=" << servo
-                              << std::endl;
                 }
             }
         }
     });
-
     while (running.load())
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 

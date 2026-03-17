@@ -22,7 +22,8 @@ private:
     LaneDetector   detector; 
     MpcController  mpc; 
     Communication  comm;  
-    Trans_UDP      udp_send; 
+    Trans_UDP udp_yolo;
+    Trans_UDP udp_debug;
     LaneChangePlanner planner;
     //Trans_UDP      udp_send1; 
     //Logger         logger; 

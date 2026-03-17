@@ -82,7 +82,7 @@ private:
 
     float computeProgressStep(float obstacle_distance) const;
 
-    float smoothStep(float x);
+    static float smoothStep(float x);
 };
 
 #endif

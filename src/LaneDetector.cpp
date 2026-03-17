@@ -291,6 +291,9 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
     right_coeffs_ = right_coeffs;
     has_left_lane_ = left_ok;
     has_right_lane_ = right_ok;
+    auto evalX = [](cv::Vec3f c, float y) {
+        return c[0] * y * y + c[1] * y + c[2];
+    };
 
     if (left_ok && right_ok) {
         float y_ref = static_cast<float>(height - 1);
@@ -304,32 +307,61 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
     }
 }
 
-
-
-cv::Mat LaneDetector::applyIPM(cv::Mat& frame) {
-    float offsetY = -70.0f;
-    float offsetX = 100.0f;
-
-    cv::Point2f tl(width * 0.20f + offsetX - 20, height * 0.65f + offsetY);
-    cv::Point2f bl(32.0f   + offsetX - 20, height - 140);
-    cv::Point2f tr(width * 0.85f - offsetX, height * 0.65f + offsetY);
-    cv::Point2f br(width  - offsetX, height - 140);
-    
-    std::vector<cv::Point2f> src_points = { tl, bl, tr, br };
-
-    for (int i = 0; i < src_points.size(); i++) {
-        cv::circle(frame, src_points[i], 5, cv::Scalar(0, 255, 0), -1);
+cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
+{
+    if (frame.empty()) {
+        bird_eye_view = cv::Mat::zeros(height, width, CV_8UC3);
+        return bird_eye_view;
     }
 
-    std::vector<cv::Point2f> dst_points = {
-        cv::Point2f(0, 0),
-        cv::Point2f(0, height),
-        cv::Point2f(width, 0),
-        cv::Point2f(width, height)
-    };
+    // =====================================================
+    // SOURCE POINTS
+    // Chọn 4 điểm hình thang bám vào 2 lane trong ảnh gốc
+    // Bạn sẽ cần tinh chỉnh nhẹ các số này theo ảnh thực tế
+    // =====================================================
+    cv::Point2f tl(235.0f, 285.0f);
+    cv::Point2f tr(405.0f, 285.0f);
+    cv::Point2f br(560.0f, 470.0f);
+    cv::Point2f bl( 95.0f, 470.0f);
+
+    std::vector<cv::Point2f> src_points = { tl, tr, br, bl };
+
+    // =====================================================
+    // DESTINATION POINTS
+    // Sau warp muốn 2 lane gần song song và nằm cân giữa ảnh
+    // =====================================================
+    const float margin_x = 170.0f;
+
+    cv::Point2f dst_tl(margin_x, 0.0f);
+    cv::Point2f dst_tr(width - margin_x, 0.0f);
+    cv::Point2f dst_br(width - margin_x, height - 1.0f);
+    cv::Point2f dst_bl(margin_x, height - 1.0f);
+
+    std::vector<cv::Point2f> dst_points = { dst_tl, dst_tr, dst_br, dst_bl };
+
+    // Debug: vẽ tứ giác nguồn trên ảnh gốc
+    cv::circle(frame, tl, 5, cv::Scalar(0, 255, 0), -1);
+    cv::circle(frame, tr, 5, cv::Scalar(0, 255, 0), -1);
+    cv::circle(frame, br, 5, cv::Scalar(0, 0, 255), -1);
+    cv::circle(frame, bl, 5, cv::Scalar(0, 0, 255), -1);
+
+    cv::line(frame, tl, tr, cv::Scalar(255, 0, 0), 2);
+    cv::line(frame, tr, br, cv::Scalar(255, 0, 0), 2);
+    cv::line(frame, br, bl, cv::Scalar(255, 0, 0), 2);
+    cv::line(frame, bl, tl, cv::Scalar(255, 0, 0), 2);
 
     cv::Mat M = cv::getPerspectiveTransform(src_points, dst_points);
-    cv::warpPerspective(frame_resize, bird_eye_view, M, cv::Size(width, height));
+
+    cv::warpPerspective(
+        frame,
+        bird_eye_view,
+        M,
+        cv::Size(width, height),
+        cv::INTER_LINEAR,
+        cv::BORDER_CONSTANT,
+        cv::Scalar(0, 0, 0)
+    );
+
     return bird_eye_view;
 }
 
@@ -572,29 +604,29 @@ float LaneDetector::computeLaneSlope(const cv::Vec3f& coeffs, float y) {
 
 
 LaneLineType LaneDetector::classifyLaneMarking(const cv::Mat& mask,
-                                 const cv::Vec3f& coeff,
-                                 int band_half_width,
-                                 int y_step,
-                                 int min_segment_len,
-                                 int min_gap_len)
+                                               const cv::Vec3f& coeff,
+                                               int band_half_width,
+                                               int y_step,
+                                               int min_segment_len,
+                                               int min_gap_len)
 {
     if (mask.empty() || mask.type() != CV_8UC1) {
         return LaneLineType::UNKNOWN;
     }
 
-    auto evalLaneX = [](const cv::Vec3f& c, float y) 
-    {
+    auto evalLaneX = [](const cv::Vec3f& c, float y) {
         return c[0] * y * y + c[1] * y + c[2];
     };
 
-    std::vector<int> occupancy; // vector lưu trạng thái lane theo tọa độ vd: 111100001111
+    std::vector<int> occupancy;
     occupancy.reserve(mask.rows / y_step + 1);
 
-    // 1) Lấy trạng thái có/không có vạch tại từng mức y
-    for (int y = 0; y < mask.rows; y += y_step) 
-    {
+    // Chỉ dùng vùng giữa -> dưới ảnh, bỏ phần quá xa vì rất nhiễu
+    int y_start = mask.rows / 5;
+    int y_end   = mask.rows - 1;
+
+    for (int y = y_start; y < y_end; y += y_step) {
         int x_center = static_cast<int>(std::round(evalLaneX(coeff, static_cast<float>(y))));
-        // tạo vùng ROI quanh lane với width = 24 pixels
         int x1 = std::max(0, x_center - band_half_width);
         int x2 = std::min(mask.cols - 1, x_center + band_half_width);
 
@@ -606,18 +638,41 @@ LaneLineType LaneDetector::classifyLaneMarking(const cv::Mat& mask,
         cv::Rect roi(x1, y, x2 - x1 + 1, std::min(y_step, mask.rows - y));
         cv::Mat band = mask(roi);
 
-        int white_pixels = cv::countNonZero(band); // đếm số pixel trắng
-        int total_pixels = roi.width * roi.height; // 
+        int white_pixels = cv::countNonZero(band);
+        int total_pixels = roi.width * roi.height;
 
-        // nếu đủ trắng thì coi như tại mức y này có lane
-        occupancy.push_back((white_pixels > 0.3 * total_pixels) ? 1 : 0); // chỗ này có thể calib
+        // Hạ threshold một chút để lane liền đỡ bị đứt giả
+        float white_ratio = static_cast<float>(white_pixels) / static_cast<float>(total_pixels);
+        occupancy.push_back((white_ratio > 0.18f) ? 1 : 0);
     }
-    // ta xác định đc ma trận 11100011100001110000111
+
     if (occupancy.empty()) {
         return LaneLineType::UNKNOWN;
     }
 
-    // 2) Gom thành các segment trắng và gap đen
+    // =====================================================
+    // Lấp các lỗ nhỏ: 1 0 1 -> 1 1 1
+    //                 1 0 0 1 -> 1 1 1 1
+    // =====================================================
+    for (size_t i = 1; i + 1 < occupancy.size(); ++i) {
+        if (occupancy[i - 1] == 1 && occupancy[i] == 0 && occupancy[i + 1] == 1) {
+            occupancy[i] = 1;
+        }
+    }
+
+    for (size_t i = 1; i + 2 < occupancy.size(); ++i) {
+        if (occupancy[i - 1] == 1 &&
+            occupancy[i] == 0 &&
+            occupancy[i + 1] == 0 &&
+            occupancy[i + 2] == 1) {
+            occupancy[i] = 1;
+            occupancy[i + 1] = 1;
+        }
+    }
+
+    // =====================================================
+    // Tách segment trắng và gap đen
+    // =====================================================
     std::vector<int> white_segments;
     std::vector<int> black_gaps;
 
@@ -635,48 +690,50 @@ LaneLineType LaneDetector::classifyLaneMarking(const cv::Mat& mask,
         }
     }
 
-    if (occupancy.back() == 1) 
-    {
+    if (occupancy.back() == 1) {
         white_segments.push_back(current_len);
-    } 
-    else 
-    {
+    } else {
         black_gaps.push_back(current_len);
     }
 
-    // 3) Lọc các segment/gap quá ngắn để bỏ nhiễu
     int valid_white_segments = 0;
     int valid_black_gaps = 0;
+    int max_white_len = 0;
+    int max_black_len = 0;
 
     for (int len : white_segments) {
         if (len >= min_segment_len) valid_white_segments++;
+        if (len > max_white_len) max_white_len = len;
     }
+
     for (int len : black_gaps) {
         if (len >= min_gap_len) valid_black_gaps++;
+        if (len > max_black_len) max_black_len = len;
     }
 
-    // 4) Heuristic:
-    // - vạch đứt: có nhiều segment trắng và có gap rõ
-    // - vạch liền: gần như một dải trắng dài, gap rất ít
-    if (valid_white_segments >= 2 && valid_black_gaps >= 1) 
-    {
-        return LaneLineType::DASHED;
-    }
-
-    if (valid_white_segments >= 1 && valid_black_gaps == 0)  // cần calib trên thực tế
-    {
-        return LaneLineType::SOLID;
-    }
-
-    // fallback: nếu độ phủ trắng lớn và ít đứt đoạn -> solid
     int white_count = std::count(occupancy.begin(), occupancy.end(), 1);
     float white_ratio = static_cast<float>(white_count) / static_cast<float>(occupancy.size());
 
-    if (white_ratio > 0.65f) {
+    // =====================================================
+    // Heuristic mới
+    // =====================================================
+
+    // Lane liền: phủ trắng cao, có 1 dải trắng dài, không có gap dài thật
+    if (white_ratio > 0.60f && max_white_len >= 6 && max_black_len <= 2) {
         return LaneLineType::SOLID;
     }
 
-    if (white_ratio > 0.15f && valid_black_gaps >= 1) {
+    // Lane đứt: nhiều đoạn trắng + có gap đủ dài
+    if (valid_white_segments >= 2 && valid_black_gaps >= 1 && max_black_len >= min_gap_len) {
+        return LaneLineType::DASHED;
+    }
+
+    // fallback
+    if (white_ratio > 0.70f) {
+        return LaneLineType::SOLID;
+    }
+
+    if (white_ratio > 0.20f && valid_black_gaps >= 1) {
         return LaneLineType::DASHED;
     }
 

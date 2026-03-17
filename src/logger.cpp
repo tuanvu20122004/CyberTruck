@@ -27,8 +27,12 @@ void Logger::log(const std::string& tag, double duration_ms) {
           << std::endl;
 }
 
-static void Logger::drawPolyline(cv::Mat& img, const std::vector<cv::Point>& line, const cv::Scalar& color)
+void Logger::drawPolyline(cv::Mat& img,
+                          const std::vector<cv::Point>& line,
+                          const cv::Scalar& color)
 {
+    if (line.size() < 2) return;
+
     for (size_t i = 1; i < line.size(); ++i)
     {
         cv::line(img, line[i - 1], line[i], color, 2);
