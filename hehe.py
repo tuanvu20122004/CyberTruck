@@ -18,14 +18,14 @@ CONF_THRESHOLD = 0.15
 NMS_THRESHOLD = 0.7
 
 FOCAL_LENGTH = 250
+CAR_REAL_HEIGHT = 0.22
 
-CAR_REAL_HEIGHT = 0.22   # kiểm tra lại giá trị này nếu khoảng cách bị sai
 SMOOTH_SIZE = 5
 
 UDP_RECV_IP = "0.0.0.0"
-YOLO_PORT = 9996         # nhận frame YOLO từ Pi
-DEBUG_PORT = 9997        # nhận bird-eye debug từ Pi
-UDP_SEND_PORT = 8888     # gửi khoảng cách về Pi
+YOLO_PORT = 9996
+DEBUG_PORT = 9997
+UDP_SEND_PORT = 8888
 BUFF_SIZE = 65536
 
 RECEIVE_TIMEOUT = 1.0
@@ -47,7 +47,6 @@ view_lock = threading.Lock()
 running = True
 last_pi_ip = None
 
-# chỉ làm mượt cho xe đang chọn
 car_pixel_buffer = deque(maxlen=SMOOTH_SIZE)
 
 # ==============================
@@ -58,6 +57,83 @@ def estimate_distance(focal_length, real_height, pixel_height):
     if pixel_height <= 0:
         return None
     return abs((focal_length * real_height) / pixel_height)
+
+class FrontDistanceFilter:
+    def __init__(
+        self,
+        alpha_near=0.50,     # vật cản gần hơn -> phản ứng nhanh hơn
+        alpha_far=0.22,      # vật cản xa hơn -> mượt hơn
+        max_jump=1.2,        # reject nếu raw distance nhảy quá lớn trong 1 frame
+        hold_frames=3,       # giữ giá trị cũ khi mất detect ngắn hạn
+        min_valid=0.05,
+        max_valid=10.0
+    ):
+        self.alpha_near = alpha_near
+        self.alpha_far = alpha_far
+        self.max_jump = max_jump
+        self.hold_frames = hold_frames
+        self.min_valid = min_valid
+        self.max_valid = max_valid
+
+        self.initialized = False
+        self.filtered = None
+        self.last_raw = None
+        self.miss_count = 0
+
+    def reset(self):
+        self.initialized = False
+        self.filtered = None
+        self.last_raw = None
+        self.miss_count = 0
+
+    def update(self, raw_distance, valid=True):
+        # invalid measurement
+        if (
+            (not valid) or
+            (raw_distance is None) or
+            (not np.isfinite(raw_distance)) or
+            (raw_distance < self.min_valid) or
+            (raw_distance > self.max_valid)
+        ):
+            if self.initialized and self.miss_count < self.hold_frames:
+                self.miss_count += 1
+                return self.filtered
+            else:
+                self.miss_count += 1
+                return None
+
+        raw_distance = float(raw_distance)
+
+        # first valid sample
+        if not self.initialized:
+            self.filtered = raw_distance
+            self.last_raw = raw_distance
+            self.initialized = True
+            self.miss_count = 0
+            return self.filtered
+
+        # reject jump quá lớn
+        if self.last_raw is not None:
+            if abs(raw_distance - self.last_raw) > self.max_jump:
+                if self.miss_count < self.hold_frames:
+                    self.miss_count += 1
+                    return self.filtered
+                return None
+
+        self.miss_count = 0
+
+        # adaptive EMA
+        if raw_distance < self.filtered:
+            alpha = self.alpha_near
+        else:
+            alpha = self.alpha_far
+
+        self.filtered = alpha * raw_distance + (1.0 - alpha) * self.filtered
+        self.last_raw = raw_distance
+
+        return self.filtered
+
+distance_filter = FrontDistanceFilter()
 
 # ==============================
 # YOLOv8 ONNX
@@ -98,7 +174,7 @@ class YOLOv8ONNX:
         if len(preds.shape) == 3:
             preds = preds[0]
 
-        # YOLOv8 ONNX COCO thường ra [84, N] -> transpose thành [N, 84]
+        # YOLOv8 ONNX thường ra [84, N] -> transpose thành [N, 84]
         if preds.shape[0] == 84 and preds.shape[1] > 84:
             preds = preds.T
 
@@ -113,7 +189,6 @@ class YOLOv8ONNX:
             cls_id = int(np.argmax(class_scores))
             score = float(class_scores[cls_id])
 
-            # chỉ lấy car
             if cls_id != CAR_CLASS_ID:
                 continue
 
@@ -210,11 +285,13 @@ def yolo_thread():
 
         results = detector.detect(frame)
 
-        best_distance = None
+        raw_distance = None
+        filtered_distance = None
         best_score = -1.0
         best_bbox = None
+        best_height = -1
 
-        # chọn xe có score cao nhất
+        # Chọn xe phía trước ưu tiên bbox cao nhất
         for r in results:
             x1, y1, x2, y2 = r["bbox"]
             pixel_height = y2 - y1
@@ -222,7 +299,8 @@ def yolo_thread():
             if pixel_height < 20:
                 continue
 
-            if r["score"] > best_score:
+            if pixel_height > best_height:
+                best_height = pixel_height
                 best_score = r["score"]
                 best_bbox = (x1, y1, x2, y2)
 
@@ -230,31 +308,44 @@ def yolo_thread():
             x1, y1, x2, y2 = best_bbox
             pixel_height = y2 - y1
 
+            # median filter cho pixel height
             car_pixel_buffer.append(pixel_height)
             smooth_pixel_height = int(np.median(car_pixel_buffer))
 
-            best_distance = estimate_distance(
+            raw_distance = estimate_distance(
                 FOCAL_LENGTH,
                 CAR_REAL_HEIGHT,
                 smooth_pixel_height
             )
 
-            if best_distance is not None:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"car {best_distance:.2f} m | {best_score:.2f}"
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1, max(y1 - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2
-                )
+            filtered_distance = distance_filter.update(raw_distance, valid=True)
 
-        # gửi khoảng cách về Pi
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            if filtered_distance is not None:
+                label = (
+                    f"car raw:{raw_distance:.2f}m "
+                    f"filt:{filtered_distance:.2f}m "
+                    f"| conf:{best_score:.2f}"
+                )
+            else:
+                label = f"car raw:{raw_distance:.2f}m filt:None | conf:{best_score:.2f}"
+
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
+            )
+        else:
+            filtered_distance = distance_filter.update(None, valid=False)
+
+        # Gửi khoảng cách đã lọc về Pi
         if last_pi_ip is not None:
-            message = f"{best_distance:.2f}" if best_distance is not None else "-1.00"
+            message = f"{filtered_distance:.2f}" if filtered_distance is not None else "-1.00"
 
             try:
                 send_sock.sendto(message.encode("utf-8"), (last_pi_ip, UDP_SEND_PORT))
@@ -354,7 +445,7 @@ def main():
         time.sleep(0.001)
 
     cv2.destroyAllWindows()
-    print("✅ Ket thuc chuong trinh.")
+    print("Ket thuc chuong trinh.")
 
 if __name__ == "__main__":
     main()
