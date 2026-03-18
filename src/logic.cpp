@@ -24,8 +24,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
     comm("/dev/ttyACM0", 115200),
-    udp_yolo("192.168.1.109", 9996, 8888),
-    udp_debug("192.168.1.109", 9997)
+    udp_yolo("192.168.1.115", 9996, 8888),
+    udp_debug("192.168.1.115", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -145,7 +145,16 @@ void Logic::run()
             if (target_centerline.size() < 3)
                 target_centerline = base_centerline;
 
+            cv::Mat mask_debug = detector.getMask();
             auto now_debug = std::chrono::steady_clock::now();
+            // if (!mask_debug.empty() &&
+            //     std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 100)
+            // {
+            //     last_debug_send = now_debug;
+            //     udp_debug.sendFrame(mask_debug, 75);
+            // }
+
+            
             if (!birdEyeView.empty() &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 100)
             {
@@ -170,7 +179,8 @@ void Logic::run()
                 {
                     float steering = mpc.computeSteeringAngle(state, desired_velocity);
 
-                    steering = 1.5f * std::pow(steering, 3) + 2.5f * steering;
+                    steering = 1.5f * std::pow(steering, 3) + 10.0f * steering;
+                    std::cout << "steering: " << steering << std::endl;
 
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;

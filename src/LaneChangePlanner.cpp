@@ -353,7 +353,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
         // Khi đã thấy 2 lane -> bám lane bình thường bằng base_centerline
         // Nếu sau đó obstacle lại xuất hiện gần và có dashed,
         // cho phép bắt đầu một lần lane-change mới.
-        if (obstacle_distance > 1.0f &&
+        if (obstacle_distance > 0.0f && //new
             obstacle_distance < trigger_distance_ &&
             any_dashed_visible)
         {
