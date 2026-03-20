@@ -70,6 +70,12 @@ private:
     int height;
     bool initialized = false;
 
+    // ===== Previous lane state =====
+    cv::Vec3f prev_left_{0.0f, 0.0f, 0.0f};
+    cv::Vec3f prev_right_{0.0f, 0.0f, 0.0f};
+    bool has_prev_left_ = false;
+    bool has_prev_right_ = false;
+
     // ===== Display data =====
     float current_steering_cmd_ = 0.0f;
     int current_servo_angle_ = 0;
