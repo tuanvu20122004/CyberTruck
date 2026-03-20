@@ -24,7 +24,7 @@ MpcController::MpcController()
     Iz_(0.04f),
     N_(10),
     Q1_(1500.0f),
-    Q2_(120.0f),
+    Q2_(100.0f),
     R_(1.0f),
     Ts_(0.071f),
     initialized_(false),
