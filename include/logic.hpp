@@ -7,6 +7,7 @@
 #include "logger.hpp"
 #include "Trans_UDP.hpp"
 #include "LaneChangePlanner.hpp"
+#include "LaneChangeDecision.hpp"
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
@@ -25,6 +26,7 @@ private:
     Trans_UDP udp_yolo;
     Trans_UDP udp_debug;
     LaneChangePlanner planner;
+    LaneChangeDecision lane_decision;
     //Trans_UDP      udp_send1; 
     //Logger         logger; 
     //Logger         logger1;
