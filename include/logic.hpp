@@ -32,7 +32,7 @@ private:
     //Logger         logger1;
     //Logger         logger2; 
     //VELOCITY 
-    const float desired_velocity = 0.04f;
+    const float desired_velocity = 0.08f;
 
     //SAFETY AND FRAME
     std::atomic<bool> running{true};

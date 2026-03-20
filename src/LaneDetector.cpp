@@ -109,7 +109,7 @@ cv::Mat LaneDetector::getMask() const{
     return mask;
 }
 // copyright by quan
-
+#if 0
 void LaneDetector::processFrame(cv::Mat& frame_resize) {
     bird_eye_view = applyIPM(frame_resize);
     mask = processMask(bird_eye_view);
@@ -299,7 +299,232 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
               << " centerline_pts=" << centerline.size()
               << std::endl;
 }
+#endif
+//HAM PROCESS FRAME MOI
+#if 1
+void LaneDetector::processFrame(cv::Mat& frame_resize) {
+    bird_eye_view = applyIPM(frame_resize);
+    mask = processMask(bird_eye_view);
 
+    static int minpix = 30;
+
+    std::vector<cv::Point> left_points, right_points;
+    cv::Vec3f left_coeffs(0.0f, 0.0f, 0.0f), right_coeffs(0.0f, 0.0f, 0.0f);
+
+    bool left_ok = false, right_ok = false;
+
+    bool merging_left_flag = false;
+    bool merging_right_flag = false;
+
+    auto evalX = [](const cv::Vec3f& c, float y) {
+        return c[0] * y * y + c[1] * y + c[2];
+    };
+
+    // =====================================================
+    // 1) DETECT LANE
+    // =====================================================
+    // Chỉ tracking khi đã initialized và thực sự có prev hợp lệ cho cả 2 lane
+    bool can_track = initialized && has_prev_left_ && has_prev_right_;
+
+    if (!can_track) {
+        slidingWindow(mask, left_points, right_points, bird_eye_view, minpix);
+
+        left_ok  = (left_points.size()  >= 30);
+        right_ok = (right_points.size() >= 30);
+
+        std::cout << "[INIT] left_points=" << left_points.size()
+                  << " right_points=" << right_points.size() << std::endl;
+
+        if (left_ok) {
+            left_coeffs = fitPoly(left_points, bird_eye_view, true);
+            left_type = classifyLaneMarking(mask, left_coeffs);
+            switch (left_type) {
+                case LaneLineType::SOLID:  std::cout << "LEFTLINE: SOLID\n"; break;
+                case LaneLineType::DASHED: std::cout << "LEFTLINE: DASHED\n"; break;
+                default:                   std::cout << "LEFTLINE: UNKNOWN\n"; break;
+            }
+
+            // Lưu prev lane trái nếu lane hiện tại detect tốt
+            prev_left_ = left_coeffs;
+            has_prev_left_ = true;
+        }
+
+        if (right_ok) {
+            right_coeffs = fitPoly(right_points, bird_eye_view, false);
+            right_type = classifyLaneMarking(mask, right_coeffs);
+            switch (right_type) {
+                case LaneLineType::SOLID:  std::cout << "RIGHTLINE: SOLID\n"; break;
+                case LaneLineType::DASHED: std::cout << "RIGHTLINE: DASHED\n"; break;
+                default:                   std::cout << "RIGHTLINE: UNKNOWN\n"; break;
+            }
+
+            // Lưu prev lane phải nếu lane hiện tại detect tốt
+            prev_right_ = right_coeffs;
+            has_prev_right_ = true;
+        }
+
+        // Chỉ bật initialized khi cả 2 lane hợp lệ và lane width hợp lý
+        if (left_ok && right_ok) {
+            float x_left  = evalX(left_coeffs,  height - 1.0f);
+            float x_right = evalX(right_coeffs, height - 1.0f);
+            float lane_width = std::fabs(x_right - x_left);
+
+            if (lane_width > 80.0f && lane_width < 500.0f) {
+                initialized = true;
+            } else {
+                initialized = false;
+            }
+        } else {
+            initialized = false;
+        }
+    }
+    else {
+        // Detect theo lane cũ
+        slidingWindowAdaptive(mask, left_points,  bird_eye_view, prev_left_);
+        slidingWindowAdaptive(mask, right_points, bird_eye_view, prev_right_);
+
+        left_ok  = (left_points.size()  >= 30);
+        right_ok = (right_points.size() >= 30);
+
+        std::cout << "[TRACK] left_points=" << left_points.size()
+                  << " right_points=" << right_points.size() << std::endl;
+
+        if (left_ok) {
+            left_coeffs = fitPoly(left_points, bird_eye_view, true);
+            left_type = classifyLaneMarking(mask, left_coeffs);
+            switch (left_type) {
+                case LaneLineType::SOLID:  std::cout << "LEFTLINE: SOLID\n"; break;
+                case LaneLineType::DASHED: std::cout << "LEFTLINE: DASHED\n"; break;
+                default:                   std::cout << "LEFTLINE: UNKNOWN\n"; break;
+            }
+        } else if (has_prev_left_) {
+            left_coeffs = prev_left_;   // fallback chỉ khi thực sự có prev hợp lệ
+        }
+
+        if (right_ok) {
+            right_coeffs = fitPoly(right_points, bird_eye_view, false);
+            right_type = classifyLaneMarking(mask, right_coeffs);
+            switch (right_type) {
+                case LaneLineType::SOLID:  std::cout << "RIGHTLINE: SOLID\n"; break;
+                case LaneLineType::DASHED: std::cout << "RIGHTLINE: DASHED\n"; break;
+                default:                   std::cout << "RIGHTLINE: UNKNOWN\n"; break;
+            }
+        } else if (has_prev_right_) {
+            right_coeffs = prev_right_;
+        }
+
+        // =====================================================
+        // 2) CHECK MERGING CHỈ KHI CẢ 2 LANE ĐỀU HỢP LỆ
+        // =====================================================
+        if (left_ok && right_ok) {
+            float x_left  = evalX(left_coeffs,  height - 1.0f);
+            float x_right = evalX(right_coeffs, height - 1.0f);
+            float lane_width = std::fabs(x_right - x_left);
+
+            if (lane_width < 100.0f) {
+                if (x_left < bird_eye_view.cols / 2.0f) {
+                    merging_right_flag = true;
+                } else {
+                    merging_left_flag = true;
+                }
+            }
+        }
+
+        if (merging_left_flag) {
+            left_ok = false;
+            if (has_prev_left_) {
+                left_coeffs = prev_left_;
+            }
+        }
+
+        if (merging_right_flag) {
+            right_ok = false;
+            if (has_prev_right_) {
+                right_coeffs = prev_right_;
+            }
+        }
+
+        // =====================================================
+        // 3) ERROR CHECK - CHỈ CHECK LANE HỢP LỆ
+        // =====================================================
+        int mid_y = bird_eye_view.rows / 2;
+        bool error_lane = false;
+
+        if (left_ok) {
+            float slope_left = computeLaneSlope(left_coeffs, static_cast<float>(mid_y));
+            if (std::fabs(slope_left) > 0.35f) {
+                error_lane = true;
+                std::cout << "[ERR] slope_left=" << slope_left << std::endl;
+            }
+        }
+
+        if (right_ok) {
+            float slope_right = computeLaneSlope(right_coeffs, static_cast<float>(mid_y));
+            if (std::fabs(slope_right) > 0.35f) {
+                error_lane = true;
+                std::cout << "[ERR] slope_right=" << slope_right << std::endl;
+            }
+        }
+
+        std::cout << "Error lane flag: " << error_lane << std::endl;
+
+        if (error_lane) {
+            // Reset hoàn toàn state tracking cũ
+            initialized = false;
+
+            has_prev_left_ = false;
+            has_prev_right_ = false;
+            prev_left_ = cv::Vec3f(0.0f, 0.0f, 0.0f);
+            prev_right_ = cv::Vec3f(0.0f, 0.0f, 0.0f);
+        } else {
+            // Chỉ cập nhật prev khi lane hiện tại còn đáng tin
+            if (left_ok) {
+                prev_left_ = left_coeffs;
+                has_prev_left_ = true;
+            }
+            if (right_ok) {
+                prev_right_ = right_coeffs;
+                has_prev_right_ = true;
+            }
+
+            // Nếu mất 1 lane thì vẫn giữ lane còn lại, nhưng không tracking cả 2 lane nữa
+            if (!(has_prev_left_ && has_prev_right_)) {
+                initialized = false;
+            }
+        }
+    }
+
+    // =====================================================
+    // 4) COMPUTE CENTERLINE LUÔN LUÔN
+    // =====================================================
+    centerline = computeCenterline(left_coeffs, right_coeffs, left_ok, right_ok, bird_eye_view);
+    has_valid_lane_ = (centerline.size() >= 3);
+
+    // =====================================================
+    // 5) LƯU CHO PLANNER
+    // =====================================================
+    left_coeffs_ = left_coeffs;
+    right_coeffs_ = right_coeffs;
+    has_left_lane_ = left_ok;
+    has_right_lane_ = right_ok;
+
+    if (left_ok && right_ok) {
+        float y_ref = static_cast<float>(height - 1);
+        float x_left  = evalX(left_coeffs,  y_ref);
+        float x_right = evalX(right_coeffs, y_ref);
+        float lane_width = std::fabs(x_right - x_left);
+
+        if (lane_width > 80.0f && lane_width < 500.0f) {
+            lane_width_px_ = lane_width;
+        }
+    }
+
+    std::cout << "[FINAL] left_ok=" << left_ok
+              << " right_ok=" << right_ok
+              << " centerline_pts=" << centerline.size()
+              << std::endl;
+}
+#endif
 cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 {
     if (frame.empty()) {
