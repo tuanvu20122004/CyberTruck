@@ -8,36 +8,35 @@
 #include "Trans_UDP.hpp"
 #include "LaneChangePlanner.hpp"
 #include "LaneChangeDecision.hpp"
+
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
 #include <string>
 
-class Logic {
+class Logic
+{
 public:
     explicit Logic(const std::string& videoPath);
     void run();
 
 private:
-    //CONSTRUCTOR
-    LaneDetector   detector; 
-    MpcController  mpc; 
-    Communication  comm;  
+    // Modules
+    LaneDetector detector;
+    MpcController mpc;
+    Communication comm;
     Trans_UDP udp_yolo;
     Trans_UDP udp_debug;
     LaneChangePlanner planner;
     LaneChangeDecision lane_decision;
-    //Trans_UDP      udp_send1; 
-    //Logger         logger; 
-    //Logger         logger1;
-    //Logger         logger2; 
-    //VELOCITY 
+
+    // Velocity
     const float desired_velocity = 0.08f;
 
-    //SAFETY AND FRAME
+    // Runtime
     std::atomic<bool> running{true};
-    std::mutex        frame_mutex;
-    cv::Mat           latest_frame;
+    std::mutex frame_mutex;
+    cv::Mat latest_frame;
 };
 
 #endif // LOGIC_HPP

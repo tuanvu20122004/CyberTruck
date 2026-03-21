@@ -28,8 +28,8 @@ public:
     {
         std::vector<cv::Point> base_centerline;
 
-        cv::Vec3f left_coeff{0, 0, 0};
-        cv::Vec3f right_coeff{0, 0, 0};
+        cv::Vec3f left_coeff{0.0f, 0.0f, 0.0f};
+        cv::Vec3f right_coeff{0.0f, 0.0f, 0.0f};
 
         bool has_left_lane = false;
         bool has_right_lane = false;
@@ -45,7 +45,7 @@ public:
         // vận tốc xe ego, m/s
         float ego_speed = 0.0f;
 
-        // chu kỳ cập nhật, giây
+        // chu kỳ cập nhật data gửi vào update, giây
         float dt = 0.05f;
 
         int img_width = 640;
@@ -58,10 +58,10 @@ public:
         DecisionDirection direction = DecisionDirection::NONE;
         DecisionState state = DecisionState::KEEP_LANE;
 
-        float urgency = 0.0f;          // 0 -> 1
+        float urgency = 0.0f;   // 0 -> 1
         float ttc_proxy = std::numeric_limits<float>::infinity();
-        float left_score = 0.0f;
-        float right_score = 0.0f;
+        float left_score = -1.0f;
+        float right_score = -1.0f;
         int persistence_count = 0;
     };
 
@@ -77,16 +77,22 @@ public:
         float ttc_threshold = 2.2f;
 
         // số frame liên tiếp đủ điều kiện mới cho đổi làn
-        int persistence_frames = 4;
+        int persistence_frames = 3;
 
-        // số frame khóa sau khi vừa duyệt một lane change
-        int cooldown_frames = 18;
+        // số frame khóa sau khi vừa hoàn tất một lane change
+        int cooldown_frames = 10;
 
         // bias để tránh nhảy trái/phải liên tục
         float hysteresis_bonus = 0.20f;
 
-        // ưu tiên nếu cả hai phía đều hợp lệ
-        float keep_direction_bias = 0.12f;
+        // ngưỡng coi như hai score gần ngang nhau
+        float keep_direction_bias = 0.09f;
+
+        // ưu tiên vượt trái nhẹ
+        float left_preference_bonus = 0.08f;
+
+        // nếu hai phía gần như hòa và chưa có lịch sử thì ưu tiên trái
+        bool prefer_left_when_tied = true;
     };
 
     explicit LaneChangeDecision(const Params& params = Params());
@@ -96,6 +102,10 @@ public:
     void notifyLaneChangeStarted();
     void notifyLaneChangeFinished();
     void reset();
+
+    DecisionState getState() const { return state_; }
+    DecisionDirection getLastPreferredDirection() const { return last_preferred_direction_; }
+    DecisionDirection getCommittedDirection() const { return committed_direction_; }
 
 private:
     Params params_;

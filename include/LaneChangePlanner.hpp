@@ -5,7 +5,6 @@
 #include <vector>
 #include "LaneDetector.hpp"
 
-
 enum class PlannerState
 {
     KEEP_LANE = 0,
@@ -19,15 +18,15 @@ enum Type_Change_t
     CHANGE_LEFT,
     CHANGE_RIGHT,
 };
+
 typedef struct
 {
     Type_Change_t type_change;
     int first_access = 0;
-    /* data */
 } State_Change_Lane_t;
 
-
-class LaneChangePlanner {
+class LaneChangePlanner
+{
 public:
     LaneChangePlanner();
 
@@ -45,19 +44,29 @@ public:
         int img_height
     );
 
+    void requestLaneChange(Type_Change_t dir);
+
+    bool isLaneChangeActive() const;
+    bool isLaneChangeFinished() const;
+    void clearFinishedFlag();
+
     PlannerState getState() const { return state_; }
+    Type_Change_t getCurrentDirection() const { return State_change_line.type_change; }
 
 private:
     State_Change_Lane_t State_change_line;
+
     PlannerState state_;
     float progress_;
     float trigger_distance_;
-    // bước tăng progress mỗi lần update
     float min_progress_step_;
     float max_progress_step_;
 
+    bool lane_change_requested_;
+    bool lane_change_finished_;
+    Type_Change_t requested_direction_;
 
-    std::vector<cv::Point> last_target_line_; // state dashed_lane nhỡ bị mất trong vài frame
+    std::vector<cv::Point> last_target_line_;
 
     std::vector<cv::Point> buildCenterlineFromBoundary(
         const cv::Vec3f& coeff,
@@ -74,16 +83,8 @@ private:
 
     static float meanX(const std::vector<cv::Point>& line);
 
-    std::vector<cv::Point> chooseDashedTarget(
-        const std::vector<cv::Point>& left_target,
-        const std::vector<cv::Point>& right_target,
-        const std::vector<cv::Point>& base_centerline
-    ) const;
-
     float computeProgressStep(float obstacle_distance) const;
-
     float aggressiveBlend(float alpha);
-
     static float smoothStep(float x);
 };
 
