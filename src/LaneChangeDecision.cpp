@@ -10,8 +10,13 @@ LaneChangeDecision::LaneChangeDecision(const Params& params)
       committed_direction_(DecisionDirection::NONE),
       last_obstacle_distance_(-1.0f),
       has_last_distance_(false),
-      persistence_count_(0),
+      persistence_count_(0), // số lượng frame đã đếm để confirm
       cooldown_count_(0)
+{
+}
+
+LaneChangeDecision::LaneChangeDecision()
+    : LaneChangeDecision(Params{})
 {
 }
 
@@ -219,12 +224,14 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         state_ = DecisionState::KEEP_LANE;
     }
 
+    // nếu ko đủ data =>> ko chuyển làn
     if (in.base_centerline.size() < 3)
     {
         out.state = state_;
         return out;
     }
 
+    // xác định chiều dài lane
     float lane_width = in.lane_width_px;
     if (lane_width < 250.0f || lane_width > 550.0f)
         lane_width = 400.0f;
@@ -237,6 +244,8 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
     out.ttc_proxy = ttc_proxy;
     out.urgency = urgency;
 
+    // đánh giá có vật cản phía trước ko
+    // và khả năng va chạm với vật thể
     const bool front_blocked =
         (in.obstacle_distance > 0.0f) &&
         (in.obstacle_distance < params_.caution_distance ||
@@ -287,6 +296,7 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
     out.left_score = left_score;
     out.right_score = right_score;
 
+    // chọn hướng tốt nhất
     DecisionDirection preferred = DecisionDirection::NONE;
     float best_score = -1.0f;
 

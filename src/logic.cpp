@@ -26,8 +26,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.115", 9996, 8888),
-      udp_debug("192.168.1.115", 9997)
+      udp_yolo("192.168.1.105", 9996, 8888),
+      udp_debug("192.168.1.105", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -73,7 +73,7 @@ void Logic::run()
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - last_yolo_send).count() >= 50)
             {
                 last_yolo_send = now;
-                udp_yolo.sendFrame(frame_yolo, 85);
+                udp_yolo.sendFrame(frame_yolo, 90);
             }
 
             int key = cv::waitKey(1);
@@ -96,6 +96,7 @@ void Logic::run()
         auto last_decision_tick = std::chrono::steady_clock::now();
 
         float last_valid_distance = -1.0f;
+        float prev_distance = -1.0f;
         auto last_distance_time = std::chrono::steady_clock::now();
 
         while (running.load())
@@ -120,23 +121,36 @@ void Logic::run()
             std::vector<cv::Point> base_centerline = detector.getCenterline();
             cv::Mat birdEyeView = detector.getBirdEyeView();
 
+            //  auto now_debug = std::chrono::steady_clock::now();
+
+            // if (!birdEyeView.empty() &&
+            //     std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 10)
+            // {
+            //     last_debug_send = now_debug;
+
+            //     cv::Mat debug_view = birdEyeView.clone();
+            //     udp_debug.sendFrame(debug_view, 85);
+            // }
+
+
             // =========================
             // Receive / hold obstacle distance
             // =========================
             if (udp_yolo.receiveDistance())
             {
                 float d = udp_yolo.getDistance();
+
                 if (d > 0.0f)
                 {
                     last_valid_distance = d;
+                    prev_distance = d;
                     last_distance_time = std::chrono::steady_clock::now();
                 }
-            }
-
-            auto now_dist = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now_dist - last_distance_time).count() > 500)
-            {
-                last_valid_distance = -1.0f;
+                else
+                {
+                    // giữ giá trị cũ nếu YOLO trả -1
+                    last_valid_distance = prev_distance;
+                }
             }
 
             float distance = last_valid_distance;
@@ -221,7 +235,7 @@ void Logic::run()
             auto now_debug = std::chrono::steady_clock::now();
 
             if (!birdEyeView.empty() &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 100)
+                std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_send).count() >= 70)
             {
                 last_debug_send = now_debug;
 
@@ -242,22 +256,22 @@ void Logic::run()
                     std::to_string(decision_out.left_score) + " / " +
                     std::to_string(decision_out.right_score);
 
-                cv::putText(debug_view, state_text, cv::Point(20, 30),
+                cv::putText(debug_view, state_text, cv::Point(400, 30),
                             cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 0), 2);
 
-                cv::putText(debug_view, dir_text, cv::Point(20, 55),
+                cv::putText(debug_view, dir_text, cv::Point(400, 55),
                             cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 0), 2);
 
-                cv::putText(debug_view, urgency_text, cv::Point(20, 80),
+                cv::putText(debug_view, urgency_text, cv::Point(400, 80),
                             cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 255), 2);
 
-                cv::putText(debug_view, ttc_text, cv::Point(20, 105),
+                cv::putText(debug_view, ttc_text, cv::Point(400, 105),
                             cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 0, 255), 2);
 
-                cv::putText(debug_view, score_text, cv::Point(20, 130),
+                cv::putText(debug_view, score_text, cv::Point(400, 130),
                             cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200, 200, 200), 2);
 
-                udp_debug.sendFrame(debug_view, 75);
+                udp_debug.sendFrame(debug_view, 70);
             }
 
             // =========================
@@ -282,10 +296,10 @@ void Logic::run()
                     int servo = static_cast<int>(std::lround(97.0f + steering));
                     float velocity_cmd = desired_velocity;
 
-                    std::cout << "[LOGIC] steering=" << steering
-                              << " servo=" << servo
-                              << " distance=" << distance
-                              << std::endl;
+                    // std::cout << "[LOGIC] steering=" << steering
+                    //           << " servo=" << servo
+                    //           << " distance=" << distance
+                    //           << std::endl;
 
                     comm.sendCommands(velocity_cmd, servo);
                 }

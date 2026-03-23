@@ -31,7 +31,7 @@ private:
     LaneChangeDecision lane_decision;
 
     // Velocity
-    const float desired_velocity = 0.08f;
+    const float desired_velocity = 0.05f;
 
     // Runtime
     std::atomic<bool> running{true};

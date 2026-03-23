@@ -300,7 +300,6 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
               << std::endl;
 }
 #endif
-//HAM PROCESS FRAME MOI
 #if 1
 void LaneDetector::processFrame(cv::Mat& frame_resize) {
     bird_eye_view = applyIPM(frame_resize);
@@ -386,8 +385,8 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
         left_ok  = (left_points.size()  >= 30);
         right_ok = (right_points.size() >= 30);
 
-        std::cout << "[TRACK] left_points=" << left_points.size()
-                  << " right_points=" << right_points.size() << std::endl;
+        // std::cout << "[TRACK] left_points=" << left_points.size()
+        //           << " right_points=" << right_points.size() << std::endl;
 
         if (left_ok) {
             left_coeffs = fitPoly(left_points, bird_eye_view, true);
@@ -466,7 +465,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
             }
         }
 
-        std::cout << "Error lane flag: " << error_lane << std::endl;
+        // std::cout << "Error lane flag: " << error_lane << std::endl;
 
         if (error_lane) {
             // Reset hoàn toàn state tracking cũ
@@ -824,7 +823,7 @@ std::vector<cv::Point> LaneDetector::computeCenterline(cv::Vec3f coeff_left,
             cv::circle(outImg, {x, y}, 2, {255, 255, 0}, -1);
 	}
     }
-    std::cout << "Lane Width Average: " << current_laneW << "px" << std::endl;
+    // std::cout << "Lane Width Average: " << current_laneW << "px" << std::endl;
 
     // ==== Debug hiển thị ==== 
     std::string dbg_text = "W=" + std::to_string((int)laneW_avg) + "px";

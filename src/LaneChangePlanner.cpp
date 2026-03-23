@@ -7,7 +7,7 @@
 LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       progress_(0.0f),
-      trigger_distance_(1.1f),
+      trigger_distance_(1.2f),
       min_progress_step_(0.025f),
       max_progress_step_(0.12f),
       lane_change_requested_(false),
@@ -208,7 +208,8 @@ std::vector<cv::Point> LaneChangePlanner::update(
     {
         // Planner không tự quyết định nữa.
         // Chỉ bắt đầu khi Decision đã gửi request.
-        if (lane_change_requested_)
+        if (obstacle_distance > 0.4f && //new
+            obstacle_distance < trigger_distance_ && lane_change_requested_)
         {
             lane_change_requested_ = false;
             lane_change_finished_ = false;
@@ -254,6 +255,8 @@ std::vector<cv::Point> LaneChangePlanner::update(
                       << State_change_line.type_change << "\n";
         }
 
+        std::cout << "[PLANNER] KEEP_LANE"
+            << "\n";
         return base_centerline;
     }
 
@@ -296,10 +299,13 @@ std::vector<cv::Point> LaneChangePlanner::update(
                   << "\n";
 
         // Điều kiện hoàn tất:
-        // - progress gần hoàn tất
-        // - và perception đã ổn định trở lại
-        if ((progress_ >= 0.95f) ||
-            (progress_ > 0.80f && both_lanes_visible))
+        // khi mà tồn tại 2 lane của làn target
+        // khoảng cách thỏa đki chuyển mà ko quá bé =>> hạn chế bug khi detect trúng xe làn bên cạnh
+        // progress_ lớn
+        if ((obstacle_distance < 0.8f ||
+            obstacle_distance > trigger_distance_) &&
+            both_lanes_visible &&
+            progress_ > 0.6f)
         {
             state_ = PlannerState::FOLLOW_LANE;
             progress_ = 0.0f;

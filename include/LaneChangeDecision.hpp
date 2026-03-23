@@ -68,10 +68,10 @@ public:
     struct Params
     {
         // vùng bắt đầu quan tâm vật cản
-        float caution_distance = 2.2f;
+        float caution_distance = 1.4f;
 
         // vùng rất gần -> tăng urgency mạnh
-        float critical_distance = 1.1f;
+        float critical_distance = 1.3f;
 
         // TTC proxy nhỏ hơn ngưỡng này thì coi là cấp bách
         float ttc_threshold = 2.2f;
@@ -80,7 +80,7 @@ public:
         int persistence_frames = 3;
 
         // số frame khóa sau khi vừa hoàn tất một lane change
-        int cooldown_frames = 10;
+        int cooldown_frames = 5;
 
         // bias để tránh nhảy trái/phải liên tục
         float hysteresis_bonus = 0.20f;
@@ -95,7 +95,8 @@ public:
         bool prefer_left_when_tied = true;
     };
 
-    explicit LaneChangeDecision(const Params& params = Params());
+    LaneChangeDecision();
+    explicit LaneChangeDecision(const Params& params);
 
     Output update(const Input& in);
 
