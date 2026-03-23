@@ -28,8 +28,8 @@ public:
     {
         std::vector<cv::Point> base_centerline;
 
-        cv::Vec3f left_coeff{0, 0, 0};
-        cv::Vec3f right_coeff{0, 0, 0};
+        cv::Vec3f left_coeff{0.0f, 0.0f, 0.0f};
+        cv::Vec3f right_coeff{0.0f, 0.0f, 0.0f};
 
         bool has_left_lane = false;
         bool has_right_lane = false;
@@ -54,26 +54,24 @@ public:
 
     struct Output
     {
-        bool approve_lane_change = false; // ra quyết định có đổi làn hay chưa
+        bool approve_lane_change = false;
         DecisionDirection direction = DecisionDirection::NONE;
         DecisionState state = DecisionState::KEEP_LANE;
 
-        float urgency = 0.0f;          // 0 -> 1
+        float urgency = 0.0f;   // 0 -> 1
         float ttc_proxy = std::numeric_limits<float>::infinity();
-        // chưa va chạm ta coi tgian dẫn đến va chạm là vô cùng
-        float left_score = 0.0f;
-        float right_score = 0.0f;
-        int persistence_count = 0; // số frame liên tiếp mà đk chuyển làn đc đưa ra
-        // => ko phản ứng quá nhanh với nhiễu
+        float left_score = -1.0f;
+        float right_score = -1.0f;
+        int persistence_count = 0;
     };
 
     struct Params
     {
         // vùng bắt đầu quan tâm vật cản
-        float caution_distance = 2.2f;
+        float caution_distance = 1.4f;
 
         // vùng rất gần -> tăng urgency mạnh
-        float critical_distance = 1.1f;
+        float critical_distance = 1.3f;
 
         // TTC proxy nhỏ hơn ngưỡng này thì coi là cấp bách
         float ttc_threshold = 2.2f;
@@ -81,21 +79,24 @@ public:
         // số frame liên tiếp đủ điều kiện mới cho đổi làn
         int persistence_frames = 3;
 
-        // số frame khóa sau khi vừa duyệt một lane change
-        int cooldown_frames = 10;
+        // số frame khóa sau khi vừa hoàn tất một lane change
+        int cooldown_frames = 5;
 
         // bias để tránh nhảy trái/phải liên tục
         float hysteresis_bonus = 0.20f;
 
-        // ưu tiên nếu cả hai phía đều hợp lệ
+        // ngưỡng coi như hai score gần ngang nhau
         float keep_direction_bias = 0.09f;
 
+        // ưu tiên vượt trái nhẹ
         float left_preference_bonus = 0.08f;
-        
+
+        // nếu hai phía gần như hòa và chưa có lịch sử thì ưu tiên trái
         bool prefer_left_when_tied = true;
     };
 
-    explicit LaneChangeDecision(const Params& params = Params());
+    LaneChangeDecision();
+    explicit LaneChangeDecision(const Params& params);
 
     Output update(const Input& in);
 
@@ -103,29 +104,25 @@ public:
     void notifyLaneChangeFinished();
     void reset();
 
+    DecisionState getState() const { return state_; }
+    DecisionDirection getLastPreferredDirection() const { return last_preferred_direction_; }
+    DecisionDirection getCommittedDirection() const { return committed_direction_; }
+
 private:
-    Params params_;// tham số cấu hình.
+    Params params_;
 
-    DecisionState state_; // Trạng thái hiện tại của decision machine.
-    DecisionDirection last_preferred_direction_; // Hướng ưu tiên ở lần cập nhật trước.
-    DecisionDirection committed_direction_; //Hướng đã chốt khi planner thực sự bắt đầu đổi làn.
+    DecisionState state_;
+    DecisionDirection last_preferred_direction_;
+    DecisionDirection committed_direction_;
 
-    // Khoảng cách vật cản của frame trước, dùng để tính closing rate.
     float last_obstacle_distance_;
-    // Cho biết có dữ liệu frame trước hay chưa.
     bool has_last_distance_;
 
-    //Số frame liên tiếp đang nghiêng về lane change =>> cơ sở để ra quyết định
     int persistence_count_;
-    // Số frame còn lại trong cooldown =>> tránh chuyển làn liên tục
     int cooldown_count_;
 
-
-    // Ước lượng vật cản đang tiến gần nhanh bao nhiêu.
     float estimateClosingRate(float distance, float dt);
-    // Tính TTC xấp xỉ.
     float computeTtcProxy(float distance, float closing_rate, float ego_speed) const;
-    // Nén mức nguy hiểm thành chỉ số 0 -> 1.
     float computeUrgency(float distance, float ttc_proxy) const;
 
     std::vector<cv::Point> buildCenterlineFromBoundary(

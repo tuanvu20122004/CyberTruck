@@ -4,15 +4,19 @@
 #include <cmath>
 
 LaneChangeDecision::LaneChangeDecision(const Params& params)
-    : params_(params), // bộ tham số cấu hình =>> read only
-    // bộ params này sẽ so sánh các biến dưới đây nhằm ra quyết định
+    : params_(params),
       state_(DecisionState::KEEP_LANE),
       last_preferred_direction_(DecisionDirection::NONE),
       committed_direction_(DecisionDirection::NONE),
       last_obstacle_distance_(-1.0f),
       has_last_distance_(false),
-      persistence_count_(0), // count số lượng frame nghiêng về lane change
+      persistence_count_(0), // số lượng frame đã đếm để confirm
       cooldown_count_(0)
+{
+}
+
+LaneChangeDecision::LaneChangeDecision()
+    : LaneChangeDecision(Params{})
 {
 }
 
@@ -27,28 +31,27 @@ void LaneChangeDecision::reset()
     cooldown_count_ = 0;
 }
 
-// tầng decision báo cho planner 
 void LaneChangeDecision::notifyLaneChangeStarted()
 {
+    // Planner đã nhận lệnh và bắt đầu maneuver
     committed_direction_ = last_preferred_direction_;
     state_ = DecisionState::APPROVE_CHANGE;
-    persistence_count_ = 0; // reset
+    persistence_count_ = 0;
 }
 
-// planner báo lại cho decision để đi vào cooldown
-// khóa mọi chuyển làn trong vài frame 
-// xóa hướng đã chốt =>> dễ bị rung động bởi nhiễu
 void LaneChangeDecision::notifyLaneChangeFinished()
 {
+    // Planner báo đã đổi làn xong -> khóa vài frame để tránh rung
     state_ = DecisionState::COOLDOWN;
     cooldown_count_ = params_.cooldown_frames;
     committed_direction_ = DecisionDirection::NONE;
+    persistence_count_ = 0;
 }
 
-// ước lượng giá trị tb của  x tại các centerline =>> ra quyết định chuyển lane nào
 float LaneChangeDecision::meanX(const std::vector<cv::Point>& line) const
 {
-    if (line.empty()) return 0.0f;
+    if (line.empty())
+        return 0.0f;
 
     double sum = 0.0;
     for (const auto& p : line)
@@ -65,7 +68,7 @@ std::vector<cv::Point> LaneChangeDecision::buildCenterlineFromBoundary(
 ) const
 {
     std::vector<cv::Point> line;
-    line.reserve(img_height / 10 + 1);
+    line.reserve(static_cast<size_t>(img_height / 10 + 1));
 
     for (int y = 0; y < img_height; y += 10)
     {
@@ -77,8 +80,6 @@ std::vector<cv::Point> LaneChangeDecision::buildCenterlineFromBoundary(
     return line;
 }
 
-
-// ước lượng tốc độ tiến gần của vật cản =>> yếu tố đánh giá
 float LaneChangeDecision::estimateClosingRate(float distance, float dt)
 {
     if (distance <= 0.0f || dt <= 1e-4f)
@@ -92,48 +93,42 @@ float LaneChangeDecision::estimateClosingRate(float distance, float dt)
 
     if (has_last_distance_)
     {
-        // distance giảm => closing_rate dương
+        // distance giảm -> đang tiến gần -> closing_rate dương
         closing_rate = (last_obstacle_distance_ - distance) / dt;
     }
 
     last_obstacle_distance_ = distance;
     has_last_distance_ = true;
 
-    // chỉ quan tâm xu hướng đang tiến gần, nếu ra xa closing_rate < 0 ko tính toán
-    // vì khi đó ko là tình huống khẩn cấp
+    // chỉ quan tâm xu hướng tiến gần
     return std::max(0.0f, closing_rate);
 }
 
-// hàm ước lượng ttc
 float LaneChangeDecision::computeTtcProxy(float distance, float closing_rate, float ego_speed) const
 {
-    float last_distance;
     if (distance <= 0.0f)
-        last_distance = distance;
-        // loại trừ khả năng do nhiều tín hiệu truyền về
-        // còn khi mà ko detect đc vật thể thì từ sever đã gửi giá trị trước đó
-        // =>> không đáng ngãi việc ko detect đc vật thể 
+    {
+        return std::numeric_limits<float>::infinity();
+    }
 
-    // Nếu chưa có closing rate rõ ràng, dùng ego speed làm proxy thận trọng
+    // ưu tiên dùng closing_rate nếu có
     float relative_speed = closing_rate;
 
+    // nếu closing_rate chưa rõ, dùng proxy thận trọng từ ego_speed
     if (relative_speed < 0.05f)
-        relative_speed = std::max(0.10f, 0.35f * ego_speed);
+    {
+        relative_speed = std::max(0.10f, 0.35f * std::max(ego_speed, 0.0f));
+    }
 
     return distance / relative_speed;
 }
 
-// xác định trạng thái nguy hiểm giá trị [0,1]
-// xác định bằng cách đánh giá 2 yếu tố đó là khoảng cách và thời gian ước lượng va chạm
-// =>> đưa ra trạng thái khẩn cấp
 float LaneChangeDecision::computeUrgency(float distance, float ttc_proxy) const
 {
     if (distance <= 0.0f)
         return 0.0f;
 
-    float distance_term = 0.0f; 
-    // Nếu vật cản vào vùng cảnh báo thì điểm này tăng dần từ 0 lên 1.
-    
+    float distance_term = 0.0f;
     if (distance < params_.caution_distance)
     {
         float x = (params_.caution_distance - distance) /
@@ -152,9 +147,6 @@ float LaneChangeDecision::computeUrgency(float distance, float ttc_proxy) const
     return std::clamp(urgency, 0.0f, 1.0f);
 }
 
-
-
-// hàm chấm điểm  1 hướng chuyển làn
 float LaneChangeDecision::scoreCandidate(
     const std::vector<cv::Point>& candidate,
     const std::vector<cv::Point>& base_centerline,
@@ -164,16 +156,20 @@ float LaneChangeDecision::scoreCandidate(
     DecisionDirection dir
 ) const
 {
-    if (!lane_visible) return -1.0f; // lane ko nhìn thấy
-    if (lane_type != LaneLineType::DASHED) return -1.0f; // ko là nét đứt
-    if (candidate.size() < 3 || base_centerline.size() < 3) return -1.0f; // dữ liệu lane quá ít
+    if (!lane_visible)
+        return -1.0f;
+
+    if (lane_type != LaneLineType::DASHED)
+        return -1.0f;
+
+    if (candidate.size() < 3 || base_centerline.size() < 3)
+        return -1.0f;
 
     const float base_x = meanX(base_centerline);
     const float cand_x = meanX(candidate);
     const float lateral_shift = std::fabs(cand_x - base_x);
 
-    // Nếu candidate quá gần base_centerline thì nó không tạo thành một lane-change target rõ ràng.
-
+    // target quá gần lane hiện tại -> không rõ là lane change
     if (lateral_shift < 20.0f)
         return -1.0f;
 
@@ -182,21 +178,21 @@ float LaneChangeDecision::scoreCandidate(
     // 1) lane hợp lệ
     score += 1.0f;
 
-    // 2) độ lệch sang làn mới đủ rõ
+    // 2) độ lệch hình học đủ rõ
     score += std::clamp(lateral_shift / 220.0f, 0.0f, 1.0f);
 
-    // 3) khi urgency cao thì ưu tiên đổi làn mạnh hơn
+    // 3) tình huống càng khẩn cấp càng ưu tiên đổi làn
     score += 0.8f * urgency;
 
-    // 4) hysteresis: ưu tiên giữ hướng đã thiên về trước đó
+    // 4) hysteresis: giữ hướng cũ để tránh rung
     if (dir == last_preferred_direction_)
         score += params_.hysteresis_bonus;
-    
-    // 5) bias ưu tiên vượt trái
-    if (dir == DecisionDirection::LEFT)
-    score += params_.left_preference_bonus;
 
-    // 5) nếu đang cooldown thì cấm
+    // 5) ưu tiên vượt trái nhẹ
+    if (dir == DecisionDirection::LEFT)
+        score += params_.left_preference_bonus;
+
+    // 6) đang cooldown thì cấm hoàn toàn
     if (state_ == DecisionState::COOLDOWN)
         score = -1.0f;
 
@@ -207,7 +203,17 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
 {
     Output out;
     out.state = state_;
+    out.direction = DecisionDirection::NONE;
 
+    // Nếu planner đang thực sự chạy maneuver, decision không approve lại
+    if (state_ == DecisionState::APPROVE_CHANGE)
+    {
+        out.state = state_;
+        out.persistence_count = persistence_count_;
+        return out;
+    }
+
+    // xử lý cooldown
     if (cooldown_count_ > 0)
     {
         --cooldown_count_;
@@ -218,19 +224,19 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         state_ = DecisionState::KEEP_LANE;
     }
 
+    // nếu ko đủ data =>> ko chuyển làn
     if (in.base_centerline.size() < 3)
     {
         out.state = state_;
         return out;
     }
 
+    // xác định chiều dài lane
     float lane_width = in.lane_width_px;
     if (lane_width < 250.0f || lane_width > 550.0f)
         lane_width = 400.0f;
 
-
-    // từ đầu vào đơn giản k/cách, thời gian, tốc độ
-    // => closing_rate, ttc, mức độ khẩn cấp
+    // đánh giá nguy cơ phía trước
     const float closing_rate = estimateClosingRate(in.obstacle_distance, in.dt);
     const float ttc_proxy = computeTtcProxy(in.obstacle_distance, closing_rate, in.ego_speed);
     const float urgency = computeUrgency(in.obstacle_distance, ttc_proxy);
@@ -238,14 +244,17 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
     out.ttc_proxy = ttc_proxy;
     out.urgency = urgency;
 
-    // bắt đầu cân nhắc nếu xuất hiện vật cản và khả năng va chạm
+    // đánh giá có vật cản phía trước ko
+    // và khả năng va chạm với vật thể
     const bool front_blocked =
         (in.obstacle_distance > 0.0f) &&
-        (in.obstacle_distance < params_.caution_distance || ttc_proxy < params_.ttc_threshold);
+        (in.obstacle_distance < params_.caution_distance ||
+         ttc_proxy < params_.ttc_threshold);
 
     std::vector<cv::Point> left_candidate;
     std::vector<cv::Point> right_candidate;
 
+    // Lưu ý: dấu offset phải khớp với quy ước bird-eye thực tế của bạn
     if (in.has_left_lane && in.left_type == LaneLineType::DASHED)
     {
         left_candidate = buildCenterlineFromBoundary(
@@ -266,7 +275,6 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         );
     }
 
-    // chấm điểm cho từng case khi rẽ trái or phải
     const float left_score = scoreCandidate(
         left_candidate,
         in.base_centerline,
@@ -285,10 +293,10 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         DecisionDirection::RIGHT
     );
 
-    // tính điểm cho từng hướng đổi làn
     out.left_score = left_score;
     out.right_score = right_score;
 
+    // chọn hướng tốt nhất
     DecisionDirection preferred = DecisionDirection::NONE;
     float best_score = -1.0f;
 
@@ -304,24 +312,30 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         preferred = DecisionDirection::RIGHT;
     }
 
-    // Nếu hai phía gần ngang nhau, giữ hướng cũ để tránh rung 
-    // đi trên đường có 3 làn đường, xe đi chính giữa 
-    // =>> score tính ra ở 2 bên ko chênh lệch nhiều, nma vẫn cần đưa ra quyết định chuyển làn
-    // =>> code hiện tại ko xử lí đc do sẽ bám làn hiện tại 
-    // =>> đề suất thêm tính điểm nếu đó là lane trái (ưu tiên vượt trái)
+    // Nếu hai phía gần ngang nhau:
+    // - ưu tiên giữ hướng cũ để tránh rung
+    // - nếu chưa có lịch sử, có thể ưu tiên trái
     if (left_score > 0.0f && right_score > 0.0f &&
-        std::fabs(left_score - right_score) < params_.keep_direction_bias &&
-        last_preferred_direction_ != DecisionDirection::NONE)
+        std::fabs(left_score - right_score) < params_.keep_direction_bias)
     {
-        preferred = last_preferred_direction_;
+        if (last_preferred_direction_ != DecisionDirection::NONE)
+        {
+            preferred = last_preferred_direction_;
+        }
+        else if (params_.prefer_left_when_tied)
+        {
+            preferred = DecisionDirection::LEFT;
+        }
     }
 
+    // không đổi làn nếu chưa thực sự bị chặn hoặc không có hướng hợp lệ
     if (!front_blocked || preferred == DecisionDirection::NONE || state_ == DecisionState::COOLDOWN)
     {
         persistence_count_ = 0;
         last_preferred_direction_ = preferred;
-        state_ = (state_ == DecisionState::COOLDOWN) ? DecisionState::COOLDOWN
-                                                     : DecisionState::KEEP_LANE;
+        state_ = (state_ == DecisionState::COOLDOWN)
+                     ? DecisionState::COOLDOWN
+                     : DecisionState::KEEP_LANE;
 
         out.state = state_;
         out.direction = DecisionDirection::NONE;
@@ -329,10 +343,12 @@ LaneChangeDecision::Output LaneChangeDecision::update(const Input& in)
         return out;
     }
 
+    // đã có xu hướng đổi làn
     last_preferred_direction_ = preferred;
     state_ = DecisionState::PREPARE_CHANGE;
     ++persistence_count_;
 
+    // đủ số frame liên tiếp -> approve
     if (persistence_count_ >= params_.persistence_frames)
     {
         out.approve_lane_change = true;
