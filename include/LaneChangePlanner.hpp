@@ -3,6 +3,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include <limits>
 #include "LaneDetector.hpp"
 
 enum class PlannerState
@@ -18,12 +19,6 @@ enum Type_Change_t
     CHANGE_LEFT,
     CHANGE_RIGHT,
 };
-
-typedef struct
-{
-    Type_Change_t type_change;
-    int first_access = 0;
-} State_Change_Lane_t;
 
 class LaneChangePlanner
 {
@@ -44,48 +39,151 @@ public:
         int img_height
     );
 
-    void requestLaneChange(Type_Change_t dir);
-
-    bool isLaneChangeActive() const;
-    bool isLaneChangeFinished() const;
-    void clearFinishedFlag();
-
     PlannerState getState() const { return state_; }
-    Type_Change_t getCurrentDirection() const { return State_change_line.type_change; }
+    Type_Change_t getLastDirection() const { return last_direction_; }
+
+    float getLastMinDistance() const { return last_min_distance_m_; }
+    float getLastMinTTC() const { return last_min_ttc_s_; }
+    float getLastCost() const { return last_cost_; }
+    float getMeterPerPixel() const { return meter_per_pixel_; }
+
+    void setLaneWidthMeters(float lane_width_m);
+    void setVehicleSize(float width_m, float length_m);
+    void setObstacleSize(float width_m, float length_m);
+    void setSafeMargin(float safe_margin_m);
+    void setSpeed(float vx_mps);
+    void setTriggerDistance(float trigger_distance_m);
 
 private:
-    State_Change_Lane_t State_change_line;
+    struct ReferencePoint
+    {
+        cv::Point2f pos_px;
+        float s_m;
+        cv::Point2f n_right;
+    };
 
+    struct StaticObstacle
+    {
+        float s_m;
+        float d_m;
+        float width_m;
+        float length_m;
+        bool valid;
+    };
+
+    struct Candidate
+    {
+        int target_lane;                 // -1: left, 0: keep, +1: right
+        float maneuver_time_s;
+        float lane_change_distance_m;
+        float target_offset_m;
+
+        bool feasible;
+        bool collision;
+
+        float min_distance_m;
+        float min_ttc_s;
+        float max_curvature;
+        float max_jerk;
+        float cost;
+
+        std::vector<cv::Point> polyline_px;
+
+        Candidate()
+            : target_lane(0),
+              maneuver_time_s(0.0f),
+              lane_change_distance_m(0.0f),
+              target_offset_m(0.0f),
+              feasible(false),
+              collision(false),
+              min_distance_m(std::numeric_limits<float>::infinity()),
+              min_ttc_s(std::numeric_limits<float>::infinity()),
+              max_curvature(0.0f),
+              max_jerk(0.0f),
+              cost(std::numeric_limits<float>::infinity()) {}
+    };
+
+private:
     PlannerState state_;
-    float progress_;
+    Type_Change_t last_direction_;
+
+    int hold_counter_;
+    int hold_frames_;
+
     float trigger_distance_;
-    float min_progress_step_;
-    float max_progress_step_;
 
-    bool lane_change_requested_;
-    bool lane_change_finished_;
-    Type_Change_t requested_direction_;
+    float lane_width_m_;
+    float vehicle_width_m_;
+    float vehicle_length_m_;
+    float obstacle_width_m_;
+    float obstacle_length_m_;
+    float safe_margin_m_;
+    float vx_mps_;
 
-    std::vector<cv::Point> last_target_line_;
+    float meter_per_pixel_;
 
-    std::vector<cv::Point> buildCenterlineFromBoundary(
-        const cv::Vec3f& coeff,
-        float offset_px,
-        int img_width,
-        int img_height
-    );
+    float last_min_distance_m_;
+    float last_min_ttc_s_;
+    float last_cost_;
 
-    std::vector<cv::Point> blendCenterlines(
-        const std::vector<cv::Point>& from_line,
-        const std::vector<cv::Point>& to_line,
-        float alpha
-    );
+    int last_img_width_;
+    int last_img_height_;
 
-    static float meanX(const std::vector<cv::Point>& line);
+private:
+    void updateScaleFromLaneWidth(float lane_width_px);
 
-    float computeProgressStep(float obstacle_distance) const;
-    float aggressiveBlend(float alpha);
-    static float smoothStep(float x);
+    std::vector<ReferencePoint> buildReferencePath(
+        const std::vector<cv::Point>& base_centerline
+    ) const;
+
+    StaticObstacle buildStaticObstacle(float obstacle_distance_m) const;
+
+    bool canChangeLeft(bool has_left_lane, LaneLineType left_type) const;
+    bool canChangeRight(bool has_right_lane, LaneLineType right_type) const;
+
+    std::vector<Candidate> generateCandidates(
+        const std::vector<ReferencePoint>& ref,
+        bool allow_left,
+        bool allow_right
+    ) const;
+
+    Candidate makeKeepLaneCandidate(
+        const std::vector<ReferencePoint>& ref
+    ) const;
+
+    Candidate makeLaneChangeCandidate(
+        const std::vector<ReferencePoint>& ref,
+        int target_lane,
+        float maneuver_time_s
+    ) const;
+
+    void evaluateCandidate(
+        Candidate& candidate,
+        const StaticObstacle& obstacle
+    ) const;
+
+    Candidate selectBestCandidate(
+        const std::vector<Candidate>& candidates
+    ) const;
+
+    void updatePlannerState(const Candidate& best);
+
+    std::vector<cv::Point> offsetReferenceToPolyline(
+        const std::vector<ReferencePoint>& ref,
+        const Candidate& c
+    ) const;
+
+    float lateralOffsetAtS(float s_m, const Candidate& c) const;
+    float lateralDsAtS(float s_m, const Candidate& c) const;
+    float lateralDssAtS(float s_m, const Candidate& c) const;
+    float lateralD3dt3AtS(float s_m, const Candidate& c) const;
+
+    static float quinticBlend(float sigma);
+    static float quinticBlendD1(float sigma);
+    static float quinticBlendD2(float sigma);
+    static float quinticBlendD3(float sigma);
+
+    static float sqr(float x) { return x * x; }
 };
 
 #endif

@@ -511,8 +511,8 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
         float y_ref = static_cast<float>(height - 1);
         float x_left  = evalX(left_coeffs,  y_ref);
         float x_right = evalX(right_coeffs, y_ref);
+        // cần xem xét lại chỗ này để upadate trong lanechangeplanner
         float lane_width = std::fabs(x_right - x_left);
-
         if (lane_width > 80.0f && lane_width < 500.0f) {
             lane_width_px_ = lane_width;
         }
