@@ -37,6 +37,22 @@ DISPLAY_HEIGHT = 480
 CAR_CLASS_ID = 2  # COCO: car
 
 # ==============================
+# EGO-LANE FILTER CONFIG
+# ==============================
+
+USE_EGO_LANE_FILTER = True
+
+# Chỉ xét vật thể có đáy bbox đủ thấp trong ảnh
+MIN_BOTTOM_Y_RATIO = 0.38
+
+# Hành lang ego-lane dạng hình thang quanh tâm ảnh
+LANE_HALF_WIDTH_BOTTOM_RATIO = 0.22
+LANE_HALF_WIDTH_TOP_RATIO = 0.10
+
+# Giữ object cũ rất ngắn để chống flicker khi vừa ra khỏi lane
+OUT_OF_LANE_HOLD_FRAMES = 2
+
+# ==============================
 # SHARED DATA
 # ==============================
 
@@ -48,6 +64,7 @@ running = True
 last_pi_ip = None
 
 car_pixel_buffer = deque(maxlen=SMOOTH_SIZE)
+out_of_lane_counter = 0
 
 # ==============================
 # DISTANCE
@@ -57,6 +74,7 @@ def estimate_distance(focal_length, real_height, pixel_height):
     if pixel_height <= 0:
         return None
     return abs((focal_length * real_height) / pixel_height)
+
 
 class FrontDistanceFilter:
     def __init__(
@@ -87,7 +105,6 @@ class FrontDistanceFilter:
         self.miss_count = 0
 
     def update(self, raw_distance, valid=True):
-        # invalid measurement
         if (
             (not valid) or
             (raw_distance is None) or
@@ -104,7 +121,6 @@ class FrontDistanceFilter:
 
         raw_distance = float(raw_distance)
 
-        # first valid sample
         if not self.initialized:
             self.filtered = raw_distance
             self.last_raw = raw_distance
@@ -112,7 +128,6 @@ class FrontDistanceFilter:
             self.miss_count = 0
             return self.filtered
 
-        # reject jump quá lớn
         if self.last_raw is not None:
             if abs(raw_distance - self.last_raw) > self.max_jump:
                 if self.miss_count < self.hold_frames:
@@ -122,7 +137,6 @@ class FrontDistanceFilter:
 
         self.miss_count = 0
 
-        # adaptive EMA
         if raw_distance < self.filtered:
             alpha = self.alpha_near
         else:
@@ -133,7 +147,62 @@ class FrontDistanceFilter:
 
         return self.filtered
 
+
 distance_filter = FrontDistanceFilter()
+
+# ==============================
+# EGO-LANE FILTER HELPERS
+# ==============================
+
+def lane_half_width_px(y, img_h, img_w):
+    """
+    Ego-lane corridor dạng hình thang:
+    càng gần đáy ảnh thì càng rộng, càng xa thì càng hẹp.
+    """
+    y = max(0, min(int(y), img_h - 1))
+    t = y / float(max(img_h - 1, 1))
+
+    top_half = LANE_HALF_WIDTH_TOP_RATIO * img_w
+    bottom_half = LANE_HALF_WIDTH_BOTTOM_RATIO * img_w
+
+    return (1.0 - t) * top_half + t * bottom_half
+
+
+def is_in_ego_lane(bbox, img_w, img_h):
+    x1, y1, x2, y2 = bbox
+
+    foot_x = 0.5 * (x1 + x2)
+    foot_y = y2
+
+    # vật quá xa / quá cao trong ảnh -> bỏ qua
+    if foot_y < MIN_BOTTOM_Y_RATIO * img_h:
+        return False
+
+    lane_center_x = 0.5 * img_w
+    half_width = lane_half_width_px(foot_y, img_h, img_w)
+
+    return abs(foot_x - lane_center_x) <= half_width
+
+
+def draw_ego_lane_corridor(frame):
+    h, w = frame.shape[:2]
+
+    y_top = int(MIN_BOTTOM_Y_RATIO * h)
+    y_bottom = h - 1
+    cx = w // 2
+
+    half_top = int(lane_half_width_px(y_top, h, w))
+    half_bottom = int(lane_half_width_px(y_bottom, h, w))
+
+    pts = np.array([
+        [cx - half_top, y_top],
+        [cx + half_top, y_top],
+        [cx + half_bottom, y_bottom],
+        [cx - half_bottom, y_bottom]
+    ], dtype=np.int32)
+
+    cv2.polylines(frame, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
+
 
 # ==============================
 # YOLOv8 ONNX
@@ -245,6 +314,7 @@ def make_sock(port):
     s.settimeout(RECEIVE_TIMEOUT)
     return s
 
+
 def recv_frame(sock):
     packet, addr = sock.recvfrom(BUFF_SIZE)
     frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -255,7 +325,7 @@ def recv_frame(sock):
 # ==============================
 
 def yolo_thread():
-    global latest_yolo_view, last_pi_ip, running
+    global latest_yolo_view, last_pi_ip, running, out_of_lane_counter
 
     detector = YOLOv8ONNX(MODEL_PATH)
 
@@ -285,26 +355,59 @@ def yolo_thread():
 
         results = detector.detect(frame)
 
+        h, w = frame.shape[:2]
+
+        if USE_EGO_LANE_FILTER:
+            draw_ego_lane_corridor(frame)
+
         raw_distance = None
         filtered_distance = None
         best_score = -1.0
         best_bbox = None
         best_height = -1
 
-        # Chọn xe phía trước ưu tiên bbox cao nhất
+        # Chỉ chọn xe nằm trong ego lane
         for r in results:
             x1, y1, x2, y2 = r["bbox"]
-            pixel_height = y2 - y1
+            bbox = (x1, y1, x2, y2)
 
+            pixel_height = y2 - y1
             if pixel_height < 20:
                 continue
 
+            in_lane = True
+            if USE_EGO_LANE_FILTER:
+                in_lane = is_in_ego_lane(bbox, w, h)
+
+            color = (0, 255, 0) if in_lane else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            foot_x = int(0.5 * (x1 + x2))
+            foot_y = int(y2)
+            cv2.circle(frame, (foot_x, foot_y), 4, color, -1)
+
+            cv2.putText(
+                frame,
+                f"{'IN' if in_lane else 'OUT'} lane",
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2
+            )
+
+            if not in_lane:
+                continue
+
+            # Trong lane thì ưu tiên bbox cao nhất
             if pixel_height > best_height:
                 best_height = pixel_height
                 best_score = r["score"]
-                best_bbox = (x1, y1, x2, y2)
+                best_bbox = bbox
 
         if best_bbox is not None:
+            out_of_lane_counter = 0
+
             x1, y1, x2, y2 = best_bbox
             pixel_height = y2 - y1
 
@@ -320,7 +423,7 @@ def yolo_thread():
 
             filtered_distance = distance_filter.update(raw_distance, valid=True)
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
             if filtered_distance is not None:
                 label = (
@@ -334,18 +437,40 @@ def yolo_thread():
             cv2.putText(
                 frame,
                 label,
-                (x1, max(y1 - 10, 20)),
+                (x1, max(y1 - 30, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                (0, 255, 0),
+                (0, 255, 255),
                 2
             )
+
+            send_distance = filtered_distance
         else:
             filtered_distance = distance_filter.update(None, valid=False)
+            out_of_lane_counter += 1
+
+            # Chỉ hold rất ngắn để chống flicker, tránh giữ xe lane cũ quá lâu
+            if out_of_lane_counter <= OUT_OF_LANE_HOLD_FRAMES and filtered_distance is not None:
+                send_distance = filtered_distance
+            else:
+                send_distance = None
+                car_pixel_buffer.clear()
+                distance_filter.reset()
+
+            cv2.putText(
+                frame,
+                f"No IN-LANE car -> send: "
+                f"{'None' if send_distance is None else f'{send_distance:.2f}m'}",
+                (10, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 255),
+                2
+            )
 
         # Gửi khoảng cách đã lọc về Pi
         if last_pi_ip is not None:
-            message = f"{filtered_distance:.2f}" if filtered_distance is not None else "-1.00"
+            message = f"{send_distance:.2f}" if send_distance is not None else "-1.00"
 
             try:
                 send_sock.sendto(message.encode("utf-8"), (last_pi_ip, UDP_SEND_PORT))
@@ -446,6 +571,7 @@ def main():
 
     cv2.destroyAllWindows()
     print("Ket thuc chuong trinh.")
+
 
 if __name__ == "__main__":
     main()

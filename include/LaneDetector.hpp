@@ -96,7 +96,7 @@ private:
     cv::Vec3f right_coeffs_{0.0f, 0.0f, 0.0f};
     bool has_left_lane_ = false;
     bool has_right_lane_ = false;
-    float lane_width_px_ = 200.0f;// giá trị cần tune 
+    float lane_width_px_ = 400.0f;// giá trị cần tune 
 
     // ===== Lane detection methods =====
     cv::Mat applyIPM(cv::Mat& frame);

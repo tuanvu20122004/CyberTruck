@@ -9,13 +9,13 @@ LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       last_direction_(DONT_CHANGE),
       hold_counter_(0),// Số frame còn lại để giữ trạng thái đổi lane sau khi đã quyết định đổi lane, tránh việc đổi lane liên tục qua lại
-      hold_frames_(8),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
+      hold_frames_(5),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       trigger_distance_(1.1f),// khoảng cách kích hoạt đổi lane, khi obstacle ở khoảng cách này thì planner sẽ bắt đầu cân nhắc đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       lane_width_m_(0.40f),// Giá trị cần tune lại
-      vehicle_width_m_(0.18f),// Giá trị cần tune lại
-      vehicle_length_m_(0.28f),// Giá trị cần tune lại
-      obstacle_width_m_(0.22f),// Giá trị cần tune lại
-      obstacle_length_m_(0.22f),// Giá trị cần tune lại
+      vehicle_width_m_(0.21f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng của xe mình
+      vehicle_length_m_(0.432f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều dài của xe mình
+      obstacle_width_m_(0.20f),// da tune lại cho phù hợp với kích thước của obstacle, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng ước lượng của obstacle cần tránh, có thể là xe đạp, xe máy hoặc người đi bộ
+      obstacle_length_m_(0.22f),// da tune lại cho phù hợp với kích thước của obstacle, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều dài ước lượng của obstacle cần tránh, có thể là xe đạp, xe máy hoặc người đi bộ
       safe_margin_m_(0.08f),// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
       vx_mps_(0.08f),
       meter_per_pixel_(0.001f),// Giá trị mặc định, sẽ được cập nhật lại khi có lane width hợp lệ

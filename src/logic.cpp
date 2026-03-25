@@ -51,8 +51,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.115", 9996, 8888),
-      udp_debug("192.168.1.115", 9997)
+      udp_yolo("192.168.1.114", 9996, 8888),
+      udp_debug("192.168.1.114", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -63,8 +63,8 @@ Logic::Logic(const std::string& videoPath)
     // Planner config
     // =========================
     planner.setLaneWidthMeters(0.40f); //Giá trị cần tune lại
-    planner.setVehicleSize(0.18f, 0.28f);// Giá trị cần tune lại
-    planner.setObstacleSize(0.22f, 0.22f);// Giá trị cần tune lại
+    planner.setVehicleSize(0.21f, 0.432f);// Giá trị cần tune lại
+    planner.setObstacleSize(0.20f, 0.22f);// Giá trị cần tune lại
     planner.setSafeMargin(0.08f);// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
     planner.setSpeed(desired_velocity);
     planner.setTriggerDistance(1.1f);
@@ -180,7 +180,7 @@ void Logic::run()
 
             std::vector<cv::Point> base_centerline = detector.getCenterline();
             cv::Mat birdEyeView = detector.getBirdEyeView();
-
+            MpcState state1 = mpc.computeMpcParameters(base_centerline, birdEyeView);
             if (udp_yolo.receiveDistance())
             {
                 float d = udp_yolo.getDistance();
@@ -207,6 +207,9 @@ void Logic::run()
             int planner_height = !birdEyeView.empty() ? birdEyeView.rows : frame_local.rows;
 
             planner.setSpeed(desired_velocity);
+            cv::Mat bev = detector.getBirdEyeView();
+            if(!bev.empty())
+                udp_debug.sendFrame(bev, 80);
 
             std::vector<cv::Point> target_centerline = planner.update(
                 base_centerline,
@@ -226,7 +229,7 @@ void Logic::run()
                 target_centerline = base_centerline;
 
             MpcState state = mpc.computeMpcParameters(target_centerline, birdEyeView);
-
+            
             auto now = std::chrono::steady_clock::now();
 
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 50)
@@ -235,8 +238,14 @@ void Logic::run()
 
                 if (state.is_valid)
                 {
-                    float steering = mpc.computeSteeringAngle(state, desired_velocity);
-
+                    float steering;
+                    if(distance >1.1f){
+                        steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                    }
+                    else
+                        steering = mpc.computeSteeringAngle(state, desired_velocity);
+                    
+                        
                     steering = 1.5f * std::pow(steering, 3) + 10.0f * steering;
 
                     if (steering <= -25.0f) steering = -25.0f;
