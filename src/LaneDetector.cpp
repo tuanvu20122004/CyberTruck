@@ -769,7 +769,7 @@ std::vector<cv::Point> LaneDetector::computeCenterline(cv::Vec3f coeff_left,
     std::vector<cv::Point> centerline;
     if (outImg.empty()) return centerline;
 
-    const float LANE_WIDTH_PX = 800.0f;
+    const float LANE_WIDTH_PX = 400.0f;
     static float laneW_avg = LANE_WIDTH_PX;  
 
     auto evalX = [](cv::Vec3f c, float y) {

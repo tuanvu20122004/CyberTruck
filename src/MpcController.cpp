@@ -32,7 +32,7 @@ MpcController::MpcController()
     umin_(-28.0 * M_PI / 180.0),
     umax_(28.0 * M_PI / 180.0),
     solver_initialized_(false),
-    pixel_per_meter_(0.0002f),
+    pixel_per_meter_(0.001f),
     vehicle_x_(0.0f),
     vehicle_y_(0.0f) {
 }
