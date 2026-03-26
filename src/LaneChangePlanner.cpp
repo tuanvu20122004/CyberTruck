@@ -19,14 +19,14 @@ LaneChangePlanner::LaneChangePlanner()
       safe_margin_m_(0.08f),// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
       vx_mps_(0.08f),
       meter_per_pixel_(0.001f),// Giá trị mặc định, sẽ được cập nhật lại khi có lane width hợp lệ
-      last_min_distance_m_(std::numeric_limits<float>::infinity()),
-      last_min_ttc_s_(std::numeric_limits<float>::infinity()),
-      last_cost_(std::numeric_limits<float>::infinity()),
+      last_min_distance_m_(std::numeric_limits<float>::infinity()),// khoảng cách nhỏ nhất đến obstacle của quỹ đạo đã chọn ở lần cập nhật trước, dùng để theo dõi và debug
+      last_min_ttc_s_(std::numeric_limits<float>::infinity()),// thời gian va chạm nhỏ nhất của quỹ đạo đã chọn ở lần cập nhật trước, dùng để theo dõi và debug
+      last_cost_(std::numeric_limits<float>::infinity()),// chi phí của quỹ đạo đã chọn ở lần cập nhật trước, dùng để theo dõi và debug
       last_img_width_(640),
       last_img_height_(480)
 {
 }
-
+// Các hàm setter để cấu hình các tham số của planner, có kiểm tra giá trị đầu vào để tránh cấu hình sai lệch quá lớn
 void LaneChangePlanner::setLaneWidthMeters(float lane_width_m)
 {
     if (lane_width_m > 0.05f)
@@ -70,8 +70,8 @@ std::vector<cv::Point> LaneChangePlanner::update(
     bool has_left_lane,
     bool has_right_lane,
     float lane_width_px,
-    LaneLineType left_type,
-    LaneLineType right_type,
+    LaneLineType left_type,// loại lane line bên trái, dùng để quyết định có được phép đổi lane hay ko
+    LaneLineType right_type,// loại lane line bên phải, dùng để quyết định có được phép đổi lane hay ko
     float obstacle_distance,
     int img_width,
     int img_height
@@ -79,7 +79,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
 {
     last_img_width_ = img_width;
     last_img_height_ = img_height;
-
+//Nếu số điểm trên centerline quá ít thì ko đủ để sinh quỹ đạo đổi lane, giữ nguyên lane và trả về centerline gốc
     if (base_centerline.size() < 3)
     {
         state_ = PlannerState::KEEP_LANE;
