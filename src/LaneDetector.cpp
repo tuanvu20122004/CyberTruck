@@ -517,13 +517,15 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
             lane_width_px_ = lane_width;
         }
     }
-
-    std::cout << "[FINAL] left_ok=" << left_ok
-              << " right_ok=" << right_ok
-              << " centerline_pts=" << centerline.size()
-              << std::endl;
 }
 #endif
+float LaneDetector::getLaneWidthPx() {
+    if (has_left_lane_ && has_right_lane_) {
+        return lane_width_px_;
+    } else {
+        return 400.0f; // Giá trị mặc định, cần tune lại dựa trên thực tế
+    }
+}
 cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
 {
     if (frame.empty()) {

@@ -46,8 +46,8 @@ public:
     cv::Vec3f getRightCoeffs() const { return right_coeffs_; }
     bool hasLeftLane() const { return has_left_lane_; }
     bool hasRightLane() const { return has_right_lane_; }
-    float getLaneWidthPx() const { return lane_width_px_; }
-
+    //float getLaneWidthPx() const { return lane_width_px_; }
+    float getLaneWidthPx();
     // ===== Setter for display =====
     void setSteeringInfo(float steering_cmd, int servo_angle) {
         current_steering_cmd_ = steering_cmd;
@@ -96,8 +96,8 @@ private:
     cv::Vec3f right_coeffs_{0.0f, 0.0f, 0.0f};
     bool has_left_lane_ = false;
     bool has_right_lane_ = false;
-    float lane_width_px_ = 400.0f;// giá trị cần tune 
-
+    //float lane_width_px_ = 400.0f;// giá trị cần tune 
+    float lane_width_px_;
     // ===== Lane detection methods =====
     cv::Mat applyIPM(cv::Mat& frame);
     cv::Mat processMask(const cv::Mat& bird_eye_view);
