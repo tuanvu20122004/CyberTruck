@@ -51,8 +51,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.114", 9996, 8888),
-      udp_debug("192.168.1.114", 9997)
+      udp_yolo("192.168.1.101", 9996, 8888),
+      udp_debug("192.168.1.101", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -217,7 +217,7 @@ void Logic::run()
                 detector.getRightCoeffs(),
                 detector.hasLeftLane(),
                 detector.hasRightLane(),
-                detector.getLaneWidthPx(),
+                350,//detector.getLaneWidthPx(),
                 detector.left_type,
                 detector.right_type,
                 distance,
@@ -246,7 +246,7 @@ void Logic::run()
                         steering = mpc.computeSteeringAngle(state, desired_velocity);
                     
                         
-                    steering = 1.5f * std::pow(steering, 3) + 10.0f * steering;
+                    steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
 
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;
