@@ -30,6 +30,11 @@ const char* plannerDirToString(Type_Change_t d)
     default:           return "NONE";
     }
 }
+
+float clampf(float v, float lo, float hi)
+{
+    return std::max(lo, std::min(v, hi));
+}
 }
 
 void bindToCore(int core_id)
@@ -39,7 +44,6 @@ void bindToCore(int core_id)
     CPU_SET(core_id, &cpuset);
 
     pthread_t current_thread = pthread_self();
-
     int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
 
     if (result != 0)
@@ -54,29 +58,31 @@ Logic::Logic(const std::string& videoPath)
       udp_yolo("192.168.1.101", 9996, 8888),
       udp_debug("192.168.1.101", 9997)
 {
-    mpc.init(1000.0f, 50.0f, 5.0f);
-    mpc.debugMatrices();
-
-    mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
-
     // =========================
     // Planner config
     // =========================
-    planner.setLaneWidthMeters(0.40f); //Giá trị cần tune lại
-    planner.setVehicleSize(0.21f, 0.432f);// Giá trị cần tune lại
-    planner.setObstacleSize(0.20f, 0.22f);// Giá trị cần tune lại
-    planner.setSafeMargin(0.08f);// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
+    planner.setLaneWidthMeters(0.40f);
+    planner.setVehicleSize(0.21f, 0.432f);
+    planner.setObstacleSize(0.20f, 0.22f);
+    planner.setSafeMargin(0.08f);
     planner.setSpeed(desired_velocity);
     planner.setTriggerDistance(1.1f);
+
+    // =========================
+    // Pure Pursuit config
+    // =========================
+    // Luu y: can khai bao pure_pursuit trong logic.hpp
+    // vi du: PurePursuitController pure_pursuit;
+    pure_pursuit.setWheelbase(0.2515f);
+    pure_pursuit.setLookahead(0.35f);
+    pure_pursuit.setRearAxleOffsetPx(40.0f);
+    pure_pursuit.setMaxSteeringDeg(25.0f);
 
     if (!detector.isOpened())
     {
         std::cerr << "[LOGIC] Camera not opened." << std::endl;
         throw std::runtime_error("LaneDetector not opened");
     }
-
-    //std::cout << "[LOGIC] MPC initialized." << std::endl;
-    //std::cout << "[LOGIC] Planner initialized. Vx = " << desired_velocity << " m/s" << std::endl;
 }
 
 void Logic::run()
@@ -95,8 +101,6 @@ void Logic::run()
                  << ",min_distance_m"
                  << ",min_ttc_s"
                  << ",cost"
-                 << ",lateral_error_m"
-                 << ",yaw_rad"
                  << ",steering_deg"
                  << ",servo"
                  << ",lane_width_px"
@@ -122,7 +126,6 @@ void Logic::run()
             }
 
             cv::Mat frame_yolo;
-
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
                 latest_frame = detector.getFrameResize().clone();
@@ -146,7 +149,7 @@ void Logic::run()
         }
     });
 
-    std::thread mpc_thread([&]()
+    std::thread pp_thread([&]()
     {
         bindToCore(1);
 
@@ -163,7 +166,6 @@ void Logic::run()
         {
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
-
                 if (!latest_frame.empty())
                     frame_local = latest_frame.clone();
                 else
@@ -180,7 +182,7 @@ void Logic::run()
 
             std::vector<cv::Point> base_centerline = detector.getCenterline();
             cv::Mat birdEyeView = detector.getBirdEyeView();
-            MpcState state1 = mpc.computeMpcParameters(base_centerline, birdEyeView);
+
             if (udp_yolo.receiveDistance())
             {
                 float d = udp_yolo.getDistance();
@@ -195,20 +197,18 @@ void Logic::run()
             auto now_distance = std::chrono::steady_clock::now();
             auto distance_age_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now_distance - last_distance_time
-                ).count();
+                    now_distance - last_distance_time).count();
 
             if (distance_age_ms < obstacle_timeout_ms)
-            {
                 distance = last_valid_distance;
-            }
 
             int planner_width  = !birdEyeView.empty() ? birdEyeView.cols : frame_local.cols;
             int planner_height = !birdEyeView.empty() ? birdEyeView.rows : frame_local.rows;
 
             planner.setSpeed(desired_velocity);
+
             cv::Mat bev = detector.getBirdEyeView();
-            if(!bev.empty())
+            if (!bev.empty())
                 udp_debug.sendFrame(bev, 80);
 
             std::vector<cv::Point> target_centerline = planner.update(
@@ -217,42 +217,51 @@ void Logic::run()
                 detector.getRightCoeffs(),
                 detector.hasLeftLane(),
                 detector.hasRightLane(),
-                350,//detector.getLaneWidthPx(),
+                350, // co the doi lai detector.getLaneWidthPx() sau khi he thong on dinh
                 detector.left_type,
                 detector.right_type,
                 distance,
                 planner_width,
-                planner_height
-            );
+                planner_height);
 
             if (target_centerline.size() < 3)
                 target_centerline = base_centerline;
 
-            MpcState state = mpc.computeMpcParameters(target_centerline, birdEyeView);
-            
             auto now = std::chrono::steady_clock::now();
-
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 50)
             {
                 last_send = now;
 
-                if (state.is_valid)
+                if (!birdEyeView.empty() && target_centerline.size() >= 2)
                 {
-                    float steering;
-                    if(distance >1.1f){
-                        steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                    float meter_per_pixel = planner.getMeterPerPixel();
+                    if (meter_per_pixel > 1e-6f)
+                        pure_pursuit.setPixelPerMeter(1.0f / meter_per_pixel);
+
+                    float steering = 0.0f;
+
+                    // Khi obstacle con xa hon trigger, bam lane goc.
+                    // Khi obstacle nam trong trigger, bam quy dao chuyen lan do planner sinh ra.
+                    if (distance > 1.1f)
+                    {
+                        steering = pure_pursuit.computeSteeringAngle(
+                            base_centerline,
+                            birdEyeView.size(),
+                            desired_velocity);
                     }
                     else
-                        steering = mpc.computeSteeringAngle(state, desired_velocity);
-                    
-                        
-                    steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
+                    {
+                        steering = pure_pursuit.computeSteeringAngle(
+                            target_centerline,
+                            birdEyeView.size(),
+                            desired_velocity);
+                    }
 
-                    if (steering <= -25.0f) steering = -25.0f;
-                    else if (steering >= 25.0f) steering = 25.0f;
+                    // Giu lai nonlinear map cu de de so sanh cong bang voi ban MPC.
+                    steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
+                    steering = clampf(steering, -25.0f, 25.0f);
 
                     int servo = static_cast<int>(std::lround(97.0f + steering));
-
                     float velocity_cmd = desired_velocity;
                     comm.sendCommands(velocity_cmd, servo);
 
@@ -287,8 +296,6 @@ void Logic::run()
                                      << planner.getLastMinDistance() << ","
                                      << planner.getLastMinTTC() << ","
                                      << planner.getLastCost() << ","
-                                     << state.lateral_deviation << ","
-                                     << state.yaw_angle << ","
                                      << steering << ","
                                      << servo << ","
                                      << detector.getLaneWidthPx() << ","
@@ -304,8 +311,6 @@ void Logic::run()
                             << " minD=" << planner.getLastMinDistance()
                             << " minTTC=" << planner.getLastMinTTC()
                             << " cost=" << planner.getLastCost()
-                            << " ey=" << state.lateral_deviation
-                            << " yaw=" << state.yaw_angle
                             << " steer=" << steering
                             << " servo=" << servo
                             << std::endl;
@@ -319,7 +324,7 @@ void Logic::run()
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     if (camera_thread.joinable()) camera_thread.join();
-    if (mpc_thread.joinable()) mpc_thread.join();
+    if (pp_thread.joinable()) pp_thread.join();
 
     if (log_file.is_open())
         log_file.close();
