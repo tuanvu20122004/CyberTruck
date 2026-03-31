@@ -1,3 +1,4 @@
+// logic.hpp
 #ifndef LOGIC_HPP
 #define LOGIC_HPP
 
@@ -7,7 +8,6 @@
 #include "communication.hpp"
 #include "Trans_UDP.hpp"
 #include "LaneChangePlanner.hpp"
-#include "PurePursuitController.hpp"
 
 #include <opencv2/opencv.hpp>
 #include <atomic>
@@ -37,6 +37,8 @@ private:
         float& yaw_out
     );
 
+    static const char* controlModeToString(ControlMode mode);
+
 private:
     LaneDetector            detector;
     MpcController           mpc;
@@ -46,13 +48,16 @@ private:
     Trans_UDP               udp_debug;
     LaneChangePlanner       planner;
 
-    ControlMode control_mode = ControlMode::PURE_PURSUIT;
+    std::atomic<ControlMode> control_mode{ControlMode::MPC};
 
-    // Đồng bộ với planner: vx = 0.08 m/s
+    // Đồng bộ với planner
     const float desired_velocity = 0.08f;
 
     // Thời gian giữ obstacle cũ nếu YOLO mất detection tạm thời
     const int obstacle_timeout_ms = 2000;
+
+    // Servo center
+    const int servo_center = 97;
 
     std::atomic<bool> running{true};
     std::mutex        frame_mutex;
