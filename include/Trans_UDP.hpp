@@ -5,35 +5,32 @@
 #include <string>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <atomic>
 
 class Trans_UDP {
 public:
-    Trans_UDP(const std::string& server_ip, int port);
+    Trans_UDP(const std::string& server_ip, int send_port, int recv_port = -1);
     ~Trans_UDP();
 
-    bool initSocket();
+    bool initSockets();
     void sendFrame(const cv::Mat& frame, int quality = 80);
 
-    // Nhận khoảng cách từ laptop
-    void receiveDistance();
+    bool receiveDistance();
     float getDistance() const;
 
-    void closeSocket();
+    void closeSockets();
 
 private:
     std::string server_ip_;
-    int port_;
+    int send_port_;
+    int recv_port_;
 
-    // socket gửi frame
-    int sock_;
-    sockaddr_in server_addr_;
-
-    // socket nhận distance
+    int send_sock_;
     int recv_sock_;
+
+    sockaddr_in server_addr_;
     sockaddr_in recv_addr_;
 
-    std::atomic<float> distance_{100.0f};
+    float distance_;
 };
 
 #endif
