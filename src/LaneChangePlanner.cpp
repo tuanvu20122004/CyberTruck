@@ -427,13 +427,15 @@ void LaneChangePlanner::evaluateCandidate(
     {
         if (last_direction_ == CHANGE_LEFT)
         {
-            if (c.target_lane == -1)      direction_bias = -7.0f; // thưởng mạnh nếu giữ trái
-            else if (c.target_lane == +1) direction_bias = +7.0f; // phạt nếu flip sang phải
+            if (c.target_lane == -1)      direction_bias = -7.0f;
+            else if (c.target_lane == 0)  direction_bias = +15.0f;  // phạt bỏ đổi lane giữa chừng
+            else if (c.target_lane == +1) direction_bias = +7.0f;
         }
         else if (last_direction_ == CHANGE_RIGHT)
         {
-            if (c.target_lane == +1)      direction_bias = -7.0f; // thưởng mạnh nếu giữ phải
-            else if (c.target_lane == -1) direction_bias = 7.0f; // phạt nếu flip sang trái
+            if (c.target_lane == +1)      direction_bias = -7.0f;
+            else if (c.target_lane == 0)  direction_bias = +15.0f;
+            else if (c.target_lane == -1) direction_bias = +7.0f;
         }
     }
 
@@ -493,6 +495,7 @@ void LaneChangePlanner::updatePlannerState(const Candidate& best)
             state_ = PlannerState::KEEP_LANE;
 
         last_direction_ = DONT_CHANGE;
+        hold_counter_ = hold_frames_;
         return;
     }
 
