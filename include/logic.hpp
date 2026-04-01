@@ -1,18 +1,21 @@
+// logic.hpp
 #ifndef LOGIC_HPP
 #define LOGIC_HPP
 
 #include "LaneDetector.hpp"
 #include "MpcController.hpp"
+#include "PurePursuitController.hpp"
 #include "communication.hpp"
-#include "logger.hpp"
 #include "Trans_UDP.hpp"
 #include "RlMpcTuner.hpp"
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <vector>
 
-class Logic {
+class Logic
+{
 public:
     explicit Logic(const std::string& videoPath);
     void run();

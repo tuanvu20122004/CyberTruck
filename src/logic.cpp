@@ -1,3 +1,4 @@
+// logic.cpp
 #include "logic.hpp"
 #include <iostream>
 #include <thread>
@@ -19,6 +20,23 @@ void bindToCore(int core_id) {
     }
 }
 
+float saturate(float value, float min_value, float max_value)
+{
+    return std::max(min_value, std::min(value, max_value));
+}
+
+} // namespace
+
+const char* Logic::controlModeToString(ControlMode mode)
+{
+    switch (mode)
+    {
+    case ControlMode::MPC:          return "MPC";
+    case ControlMode::PURE_PURSUIT: return "PURE_PURSUIT";
+    default:                        return "UNKNOWN";
+    }
+}
+
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480), 
       comm("/dev/ttyACM0", 115200),  
@@ -31,6 +49,42 @@ Logic::Logic(const std::string& videoPath)
     mpc.init(1000.0f, 50.0f, 5.0f); 
     mpc.debugMatrices(); //x
     mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
+
+    // =========================
+    // Pure Pursuit config
+    // =========================
+    pure_pursuit.setWheelbase(0.2515f);
+    pure_pursuit.setLookahead(0.35f);
+    pure_pursuit.setRearAxleOffsetPx(40.0f);
+    pure_pursuit.setMaxSteeringDeg(25.0f);
+
+    // =========================
+    // Planner config
+    // =========================
+    planner.setLaneWidthMeters(0.40f);
+    planner.setVehicleSize(0.21f, 0.432f);
+    planner.setObstacleSize(0.20f, 0.22f);
+    planner.setSafeMargin(0.08f);
+    planner.setSpeed(desired_velocity);
+    planner.setTriggerDistance(1.1f);
+
+    // =========================
+    // Pure Pursuit config
+    // =========================
+    pure_pursuit.setWheelbase(0.2515f);
+    pure_pursuit.setLookahead(0.35f);
+    pure_pursuit.setRearAxleOffsetPx(40.0f);
+    pure_pursuit.setMaxSteeringDeg(25.0f);
+
+    // =========================
+    // Planner config
+    // =========================
+    planner.setLaneWidthMeters(0.40f);
+    planner.setVehicleSize(0.21f, 0.432f);
+    planner.setObstacleSize(0.20f, 0.22f);
+    planner.setSafeMargin(0.08f);
+    planner.setSpeed(desired_velocity);
+    planner.setTriggerDistance(1.1f);
 
     if (!detector.isOpened()) {
         std::cerr << "[LOGIC] LaneDetector/Camera không mở được." << std::endl;
@@ -61,6 +115,16 @@ void Logic::run() {
             if (key == 27 || key == 'q' || key == 'Q') {
                 running.store(false);
                 break;
+            }
+            else if (key == 'm' || key == 'M')
+            {
+                control_mode.store(ControlMode::MPC);
+                std::cout << "[LOGIC] Switched controller -> MPC" << std::endl;
+            }
+            else if (key == 'p' || key == 'P')
+            {
+                control_mode.store(ControlMode::PURE_PURSUIT);
+                std::cout << "[LOGIC] Switched controller -> PURE_PURSUIT" << std::endl;
             }
         }
     });
@@ -156,8 +220,6 @@ void Logic::run() {
 
     if (camera_thread.joinable()) camera_thread.join();
     if (mpc_thread.joinable()) mpc_thread.join();
-
-    //cv::destroyAllWindows();
 
     std::cout << "[LOGIC] Stopped cleanly." << std::endl;
 }
