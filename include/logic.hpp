@@ -19,26 +19,25 @@ public:
     void run();
 
 private:
-    // CORE MODULES
+    // Core modules
     LaneDetector   detector;
     MpcController  mpc;
     Communication  comm;
     Trans_UDP      udp_send;
+    Logger         logger;
     RlMpcTuner     rl_tuner;
 
-    // LOGGERS
-    Logger logger; 
-
-    // MPC STATE
-    MpcState       mpc_state;
-
-    // VELOCITY
-    const float desired_velocity = 0.04f;
-
-    // SAFETY AND FRAME
+    // Runtime
     std::atomic<bool> running{true};
     std::mutex        frame_mutex;
     cv::Mat           latest_frame;
+
+    // Vehicle config
+    const float desired_velocity = 0.04f;
+
+private:
+    void cameraLoop();
+    void controlLoop();
 };
 
 #endif // LOGIC_HPP
