@@ -139,8 +139,8 @@ private:
 
     StaticObstacle buildStaticObstacle(float obstacle_distance_m) const;
 
-    bool canChangeLeft(bool has_left_lane, LaneLineType left_type) const;
-    bool canChangeRight(bool has_right_lane, LaneLineType right_type) const;
+    bool canChangeLeft(float distance, bool has_left_lane, LaneLineType left_type) const;
+    bool canChangeRight(float distance, bool has_right_lane, LaneLineType right_type) const;
 
     std::vector<Candidate> generateCandidates(
         const std::vector<ReferencePoint>& ref,

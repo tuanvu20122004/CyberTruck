@@ -9,7 +9,7 @@ LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       last_direction_(DONT_CHANGE),
       hold_counter_(0),// Số frame còn lại để giữ trạng thái đổi lane sau khi đã quyết định đổi lane, tránh việc đổi lane liên tục qua lại
-      hold_frames_(9),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
+      hold_frames_(10),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       trigger_distance_(1.1f),// khoảng cách kích hoạt đổi lane, khi obstacle ở khoảng cách này thì planner sẽ bắt đầu cân nhắc đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       lane_width_m_(0.40f),// Giá trị cần tune lại
       vehicle_width_m_(0.21f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng của xe mình
@@ -104,8 +104,8 @@ std::vector<cv::Point> LaneChangePlanner::update(
     if (hold_counter_ > 0)
         --hold_counter_;
 
-    const bool allow_left = canChangeLeft(has_left_lane, left_type);
-    const bool allow_right = canChangeRight(has_right_lane, right_type);
+    const bool allow_left = canChangeLeft(obstacle_distance ,has_left_lane, left_type);
+    const bool allow_right = canChangeRight(obstacle_distance ,has_right_lane, right_type);
 
     bool allow_left_committed  = allow_left;
     bool allow_right_committed = allow_right;
@@ -130,6 +130,7 @@ std::vector<cv::Point> LaneChangePlanner::update(
     // xây dựng 1 đối tượng target cần đánh giá
     StaticObstacle obstacle = buildStaticObstacle(obstacle_distance);
     // xác định cost của từng candidate
+
     for (auto& c : candidates)
     {
         evaluateCandidate(c, obstacle);
@@ -226,14 +227,14 @@ LaneChangePlanner::buildStaticObstacle(float obstacle_distance_m) const
     return obs;
 }
 // Ham decision
-bool LaneChangePlanner::canChangeLeft(bool has_left_lane, LaneLineType left_type) const
+bool LaneChangePlanner::canChangeLeft(float distance, bool has_left_lane, LaneLineType left_type) const
 {
-    return has_left_lane && left_type == LaneLineType::DASHED;
+    return (distance <= trigger_distance_) && has_left_lane && left_type == LaneLineType::DASHED;
 }
 // Ham decision
-bool LaneChangePlanner::canChangeRight(bool has_right_lane, LaneLineType right_type) const
+bool LaneChangePlanner::canChangeRight(float distance,, bool has_right_lane, LaneLineType right_type) const
 {
-    return has_right_lane && right_type == LaneLineType::DASHED;
+    return(distance <= trigger_distance_) && has_right_lane && right_type == LaneLineType::DASHED;
 }
 
 // sinh quỹ đạo
@@ -426,13 +427,13 @@ void LaneChangePlanner::evaluateCandidate(
     {
         if (last_direction_ == CHANGE_LEFT)
         {
-            if (c.target_lane == -1)      direction_bias = -3.0f; // thưởng mạnh nếu giữ trái
-            else if (c.target_lane == +1) direction_bias = +3.0f; // phạt nếu flip sang phải
+            if (c.target_lane == -1)      direction_bias = -7.0f; // thưởng mạnh nếu giữ trái
+            else if (c.target_lane == +1) direction_bias = +7.0f; // phạt nếu flip sang phải
         }
         else if (last_direction_ == CHANGE_RIGHT)
         {
-            if (c.target_lane == +1)      direction_bias = -3.0f; // thưởng mạnh nếu giữ phải
-            else if (c.target_lane == -1) direction_bias = +3.0f; // phạt nếu flip sang trái
+            if (c.target_lane == +1)      direction_bias = -7.0f; // thưởng mạnh nếu giữ phải
+            else if (c.target_lane == -1) direction_bias = 7.0f; // phạt nếu flip sang trái
         }
     }
 
@@ -476,7 +477,7 @@ LaneChangePlanner::selectBestCandidate(const std::vector<Candidate>& candidates)
         }
     }
 
-    if (latched != nullptr && latched->cost <= best.cost + 3.0f)
+    if (latched != nullptr && latched->cost <= best.cost + 7.0f)
         return *latched;
 
     return best;
