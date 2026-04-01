@@ -16,16 +16,18 @@ Logger::~Logger() {
     }
 }
 
-void Logger::log(const std::string& tag, double duration_ms) {
+void Logger::log(const std::string& tag, double value) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
+
     file_ << std::put_time(std::localtime(&time), "%H:%M:%S")
           << " [" << tag << "] "
           << std::fixed << std::setprecision(3)
-          << duration_ms << " ms"
+          << value
           << std::endl;
 }
+
 
 void Logger::drawPolyline(cv::Mat& img,
                           const std::vector<cv::Point>& line,

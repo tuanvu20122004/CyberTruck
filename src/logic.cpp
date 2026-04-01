@@ -2,6 +2,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <pthread.h>
 
 void bindToCore(int core_id) {
@@ -9,7 +10,6 @@ void bindToCore(int core_id) {
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
 
-    // Bind thread to the specified core
     pthread_t current_thread = pthread_self();
     int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
     if (result != 0) {
@@ -20,44 +20,42 @@ void bindToCore(int core_id) {
 }
 
 Logic::Logic(const std::string& videoPath)
-    : detector(videoPath, 640, 480), 
-      comm("/dev/ttyACM0", 115200),  
+    : detector(videoPath, 640, 480),
+      comm("/dev/ttyACM0", 115200),
       udp_send("192.168.1.102", 9996),
-      logger("Curvature.txt"),
-      //udp_send1("192.168.1.103",9997),
-      logger1("steering.txt"),
-      logger2("Yaw.txt") {
-    // Khởi tạo MPC
-    mpc.init(1000.0f, 50.0f, 5.0f); 
-    mpc.debugMatrices(); //x
+      logger("MPC_RL_Log.txt")
+{
+    // Khởi tạo MPC ban đầu
+    mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
+    mpc.debugMatrices();
 
     if (!detector.isOpened()) {
         std::cerr << "[LOGIC] LaneDetector/Camera không mở được." << std::endl;
         throw std::runtime_error("LaneDetector not opened");
     }
+
     std::cout << "[LOGIC] MPC initialized." << std::endl;
 }
 
-void Logic::run() { 
+void Logic::run() {
     // ---- Camera thread ----
     std::thread camera_thread([&]() {
-        bindToCore(0); // Bind camera thread to core 0
+        bindToCore(0);
         cv::Mat frame;
-        //cv::namedWindow("Live Feed", cv::WINDOW_AUTOSIZE);  
 
         while (running.load()) {
-            if (!detector.getFrame(frame)) {  
+            if (!detector.getFrame(frame)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
 
             {
-                std::lock_guard<std::mutex> lock(frame_mutex); 
-                latest_frame = frame; 
+                std::lock_guard<std::mutex> lock(frame_mutex);
+                latest_frame = frame.clone();
             }
 
-            int key = cv::waitKey(1);  
+            int key = cv::waitKey(1);
             if (key == 27 || key == 'q' || key == 'Q') {
                 running.store(false);
                 break;
@@ -67,84 +65,119 @@ void Logic::run() {
 
     // ---- MPC thread ----
     std::thread mpc_thread([&]() {
-        bindToCore(1); 
+        bindToCore(1);
+
         cv::Mat frame_local;
         auto last_send = std::chrono::steady_clock::now();
-        static float prev_steering = 0;
+        float prev_steering = 0.0f;
+
         while (running.load()) {
-            auto start_time = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
                 if (!latest_frame.empty()) {
-                    frame_local = latest_frame;
+                    frame_local = latest_frame.clone();
                 } else {
                     frame_local.release();
                 }
             }
 
             if (frame_local.empty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
 
             detector.processFrame(frame_local);
-            std::vector<cv::Point> centerline = detector.getCenterline(); 
-            cv::Mat birdEyeView = detector.getBirdEyeView();        
-            MpcState state = mpc.computeMpcParameters(centerline, birdEyeView); 
-            // Gui anh ve server
-            cv::Mat bev = detector.getBirdEyeView(); // Bird eye view perspective
-            //cv::Mat bev1 = detector.getFrameResize();  // Raw frame after resize
 
-            if(!bev.empty()){
-                //GUI Bird_eye_view 
-                udp_send.sendFrame(bev,60);
+            std::vector<cv::Point> centerline = detector.getCenterline();
+            cv::Mat birdEyeView = detector.getBirdEyeView();
+            MpcState state = mpc.computeMpcParameters(centerline, birdEyeView);
+
+            // Gửi BEV lên server
+            cv::Mat bev = detector.getBirdEyeView();
+            if (!bev.empty()) {
+                udp_send.sendFrame(bev, 60);
                 std::this_thread::sleep_for(std::chrono::milliseconds(40));
             }
 
-
             auto now = std::chrono::steady_clock::now();
-            double proc_time = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count();
-
-            if(std::chrono::duration_cast<std::chrono::milliseconds>(now-last_send).count() >= 100)
-            {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 100) {
                 last_send = now;
-                if (state.is_valid) 
-                {
 
+                if (state.is_valid) {
+                    // =====================================================
+                    // 1) Tạo RL state từ MPC state
+                    // =====================================================
+                    RlMpcState rl_state{};
+                    rl_state.lateral_error = state.lateral_deviation;
+                    rl_state.yaw_error = state.yaw_angle;
+                    rl_state.velocity = desired_velocity;
+                    rl_state.curvature = state.curvature.empty() ? 0.0f : state.curvature[0];
+                    rl_state.prev_steering = prev_steering;
+
+                    // =====================================================
+                    // 2) RL suy ra trọng số Q1, Q2, R
+                    // =====================================================
+                    RlMpcWeights weights = rl_tuner.infer(rl_state);
+
+                    // cập nhật MPC weights online
+                    mpc.setWeights(weights.Q1, weights.Q2, weights.R);
+                    
+
+                    std::cout << "[RL] Q1=" << weights.Q1
+                              << " Q2=" << weights.Q2
+                              << " R="  << weights.R << std::endl;
+
+        
+                    // =====================================================
+                    // 3) Tính steering bằng MPC với weights mới
+                    // =====================================================
                     float steering = mpc.computeSteeringAngle(state, desired_velocity);
 
-                    std::cout << "Gia tri goc lai mpc: " << steering << std::endl;
-                    
-                    steering = 0.02f*pow(steering,3) + 1.15f*steering;
-                    
-                    
-                    logger1.log("Steering",steering);
+                    steering = 0.02f * std::pow(steering, 3) + 1.15f * steering;
 
-                    if (steering <= -25)
-                        steering = -25;
-                    else if (steering >= 25)
-                        steering = 25;
-                    
+                    // clamp
+                    if (steering <= -25.0f)
+                        steering = -25.0f;
+                    else if (steering >= 25.0f)
+                        steering = 25.0f;
+
+                    // =====================================================
+                    // LOGGER (1 dòng duy nhất)
+                    // =====================================================
+                    std::stringstream ss;
+                    ss << "lat=" << rl_state.lateral_error
+                    << ", yaw=" << rl_state.yaw_error
+                    << ", curv=" << rl_state.curvature
+                    << ", Q1=" << weights.Q1
+                    << ", Q2=" << weights.Q2
+                    << ", R=" << weights.R
+                    << ", steer=" << steering;
+
+                    logger.log(ss.str(), 0);
 
                     std::cout << "Gia tri goc lai qua noi suy: " << steering << std::endl;
 
-                    int servo = static_cast<int>(std::lround(97.0f + steering)); 
+                    int servo = static_cast<int>(std::lround(97.0f + steering));
+                    comm.sendCommands(desired_velocity, servo);
 
-                    comm.sendCommands(desired_velocity,servo);
+                    // =====================================================
+                    // 4) Reward + update RL
+                    // =====================================================
+                    float reward = rl_tuner.computeReward(rl_state, steering, prev_steering);
+                    rl_tuner.update(reward, rl_state);
+
+                    prev_steering = steering;
                 }
             }
         }
     });
 
-    // Chờ cho các luồng kết thúc
     while (running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));  
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     if (camera_thread.joinable()) camera_thread.join();
     if (mpc_thread.joinable()) mpc_thread.join();
-
-    //cv::destroyAllWindows();
 
     std::cout << "[LOGIC] Stopped cleanly." << std::endl;
 }

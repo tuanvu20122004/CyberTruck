@@ -6,6 +6,7 @@
 #include "communication.hpp"
 #include "logger.hpp"
 #include "Trans_UDP.hpp"
+#include "RlMpcTuner.hpp"
 
 #include <opencv2/opencv.hpp>
 #include <atomic>
@@ -18,20 +19,23 @@ public:
     void run();
 
 private:
-    //CONSTRUCTOR
-    LaneDetector   detector; 
-    MpcController  mpc; 
-    Communication  comm;  
-    Trans_UDP      udp_send; 
-    //Trans_UDP      udp_send1; 
-    Logger         logger; 
-    Logger         logger1;
+    // CORE MODULES
+    LaneDetector   detector;
+    MpcController  mpc;
+    Communication  comm;
+    Trans_UDP      udp_send;
+    RlMpcTuner     rl_tuner;
+
+    // LOGGERS
+    Logger logger; 
+
+    // MPC STATE
     MpcState       mpc_state;
-    Logger         logger2; 
-    //VELOCITY 
+
+    // VELOCITY
     const float desired_velocity = 0.04f;
 
-    //SAFETY AND FRAME
+    // SAFETY AND FRAME
     std::atomic<bool> running{true};
     std::mutex        frame_mutex;
     cv::Mat           latest_frame;
