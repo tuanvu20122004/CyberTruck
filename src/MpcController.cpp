@@ -408,3 +408,13 @@ MpcState MpcController::computeMpcParameters(const std::vector<cv::Point>& cente
     result.is_valid = true;
     return result;
 }
+
+void MpcController::setWeights(float q1, float q2, float r)
+{
+    Q1_ = q1;
+    Q2_ = q2;
+    R_  = r;
+    buildMpcMatrices(0.08f);   // hoặc dùng velocity hiện tại nếu bạn muốn
+    prev_z_dim = -1;
+    prev_constraint_dim = -1;
+}

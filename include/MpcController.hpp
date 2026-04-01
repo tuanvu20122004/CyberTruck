@@ -39,6 +39,8 @@ public:
                          float Caf, float Car, float Iz);
     void setPredictionHorizon(int N);
     void setVehiclePosition(float x, float y);
+
+    void setWeights(float q1, float q2, float r);
     
 private:
     // Vehicle parameters
