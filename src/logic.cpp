@@ -51,8 +51,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.101", 9996, 8888),
-      udp_debug("192.168.1.101", 9997)
+      udp_yolo("192.168.1.104", 9996, 8888),
+      udp_debug("192.168.1.104", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
