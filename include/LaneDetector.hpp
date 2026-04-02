@@ -108,10 +108,11 @@ private:
                        cv::Mat& outImg,
                        int minpix);
 
-    void slidingWindowAdaptive(const cv::Mat& mask,
-                               std::vector<cv::Point>& lane_points,
-                               cv::Mat& outImg,
-                               cv::Vec3f prev_poly);
+void slidingWindowAdaptive(const cv::Mat& mask,
+                           std::vector<cv::Point>& lane_points,
+                           cv::Mat& outImg,
+                           cv::Vec3f prev_poly,
+                           bool isLeft);
 
     cv::Vec3f fitPoly(const std::vector<cv::Point>& points,
                       cv::Mat& outImg,

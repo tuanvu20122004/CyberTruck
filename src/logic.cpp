@@ -150,7 +150,7 @@ void Logic::controlLoop() {
         float steering = mpc.computeSteeringAngle(state, desired_velocity);
 
         // Nội suy thực nghiệm
-        steering = 0.02f * std::pow(steering, 3) + 1.15f * steering;
+        steering = 0.017f * std::pow(steering, 3) + 1.22f * steering;
 
         // Clamp theo cơ cấu lái
         if (steering < -25.0f) steering = -25.0f;
