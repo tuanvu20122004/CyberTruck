@@ -46,8 +46,7 @@ public:
     float getLastMinTTC() const { return last_min_ttc_s_; }
     float getLastCost() const { return last_cost_; }
     float getMeterPerPixel() const { return meter_per_pixel_; }
-    int getCurrentLane() const { return current_lane_; }// -1: left, 0: center, +1: right
-    int getTargetLane() const { return target_lane_; } // -1: left, 0: center, +1: right
+
     void setLaneWidthMeters(float lane_width_m);
     void setVehicleSize(float width_m, float length_m);
     void setObstacleSize(float width_m, float length_m);
@@ -81,7 +80,8 @@ private:
 
         bool feasible;                      // quỹ đạo có hợp lệ hình học ko
         bool collision;                     // đánh giá va chạm chưa?      
-
+        int settle_counter_;
+        int settle_frames_;
         // các tiêu chí đánh giá quỹ đạo
         float min_distance_m;
         float min_ttc_s;
@@ -111,10 +111,7 @@ private:
 
     int hold_counter_;
     int hold_frames_;
-    int current_lane_;      // làn hiện tại đã xác nhận
-    int target_lane_;       // làn mục tiêu khi đang đổi
-    int settle_counter_;    // giữ ổn định sau khi đổi làn xong
-    int settle_frames_;
+
     float trigger_distance_;
 
     float lane_width_m_;
@@ -124,7 +121,8 @@ private:
     float obstacle_length_m_;
     float safe_margin_m_;
     float vx_mps_;
-
+    int settle_counter_;
+    int settle_frames_;
     float meter_per_pixel_;
 
     float last_min_distance_m_;
@@ -182,7 +180,7 @@ private:
     float lateralDsAtS(float s_m, const Candidate& c) const;
     float lateralDssAtS(float s_m, const Candidate& c) const;
     float lateralD3dt3AtS(float s_m, const Candidate& c) const;
-    float laneOffsetFromIndex(int lane_idx) const;// lane_idx: -1, 0, +1
+
     static float quinticBlend(float sigma);
     static float quinticBlendD1(float sigma);
     static float quinticBlendD2(float sigma);
