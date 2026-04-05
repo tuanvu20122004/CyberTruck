@@ -11,11 +11,11 @@ from collections import deque
 # CONFIG
 # ==============================
 
-MODEL_PATH = r"C:\Users\Admin\Downloads\yolov8n.onnx"
+MODEL_PATH = r"C:\Users\Admin\Downloads\best.onnx"
 
 INPUT_SIZE = 640
 CONF_THRESHOLD = 0.15
-NMS_THRESHOLD = 0.7
+NMS_THRESHOLD = 0.7 # tăng NMS để giảm bớt các bbox thừa, tránh nhầm lẫn khi có nhiều xe gần nhau
 
 FOCAL_LENGTH = 250
 CAR_REAL_HEIGHT = 0.22
@@ -34,7 +34,7 @@ NO_DATA_EXIT_SECONDS = 10
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 
-CAR_CLASS_ID = 2  # COCO: car
+CAR_CLASS_ID = 0   # custom model: Red_Car
 
 # ==============================
 # EGO-LANE FILTER CONFIG
@@ -43,11 +43,11 @@ CAR_CLASS_ID = 2  # COCO: car
 USE_EGO_LANE_FILTER = True
 
 # Chỉ xét vật thể có đáy bbox đủ thấp trong ảnh
-MIN_BOTTOM_Y_RATIO = 0.38
+MIN_BOTTOM_Y_RATIO = 0.42
 
 # Hành lang ego-lane dạng hình thang quanh tâm ảnh
-LANE_HALF_WIDTH_BOTTOM_RATIO = 0.22
-LANE_HALF_WIDTH_TOP_RATIO = 0.10
+LANE_HALF_WIDTH_BOTTOM_RATIO = 0.16
+LANE_HALF_WIDTH_TOP_RATIO = 0.003
 
 # Giữ object cũ rất ngắn để chống flicker khi vừa ra khỏi lane
 OUT_OF_LANE_HOLD_FRAMES = 2
@@ -65,7 +65,8 @@ last_pi_ip = None
 
 car_pixel_buffer = deque(maxlen=SMOOTH_SIZE)
 out_of_lane_counter = 0
-
+fps_value = 0.0
+prev_frame_time = None
 # ==============================
 # DISTANCE
 # ==============================
@@ -183,7 +184,7 @@ def is_in_ego_lane(bbox, img_w, img_h):
 
     return abs(foot_x - lane_center_x) <= half_width
 
-
+# đoạn này vẽ hành lang ego-lane để debug, có thể bật lên nếu muốn
 def draw_ego_lane_corridor(frame):
     h, w = frame.shape[:2]
 
@@ -201,7 +202,7 @@ def draw_ego_lane_corridor(frame):
         [cx - half_bottom, y_bottom]
     ], dtype=np.int32)
 
-    cv2.polylines(frame, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
+    #cv2.polylines(frame, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
 
 
 # ==============================
@@ -243,8 +244,9 @@ class YOLOv8ONNX:
         if len(preds.shape) == 3:
             preds = preds[0]
 
-        # YOLOv8 ONNX thường ra [84, N] -> transpose thành [N, 84]
-        if preds.shape[0] == 84 and preds.shape[1] > 84:
+        # Với YOLOv8 ONNX custom model, output thường là [C, N]
+        # Ví dụ 1 class -> [5, 8400], cần transpose thành [8400, 5]
+        if len(preds.shape) == 2 and preds.shape[0] < preds.shape[1]:
             preds = preds.T
 
         boxes = []
@@ -325,7 +327,7 @@ def recv_frame(sock):
 # ==============================
 
 def yolo_thread():
-    global latest_yolo_view, last_pi_ip, running, out_of_lane_counter
+    global latest_yolo_view, last_pi_ip, running, out_of_lane_counter, fps_value, prev_frame_time
 
     detector = YOLOv8ONNX(MODEL_PATH)
 
@@ -341,6 +343,14 @@ def yolo_thread():
             frame, addr = recv_frame(recv_sock)
             last_frame_time = time.time()
             last_pi_ip = addr[0]
+            current_time = time.time()
+            if prev_frame_time is not None:
+                instant_fps = 1.0 / max(current_time - prev_frame_time, 1e-6)
+                if fps_value == 0.0:
+                    fps_value = instant_fps
+                else:
+                    fps_value = 0.9 * fps_value + 0.1 * instant_fps
+            prev_frame_time = current_time
         except socket.timeout:
             if time.time() - last_frame_time > NO_DATA_EXIT_SECONDS:
                 print("[YOLO] Khong nhan duoc du lieu qua lau.")
@@ -423,7 +433,7 @@ def yolo_thread():
 
             filtered_distance = distance_filter.update(raw_distance, valid=True)
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+            #cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
             if filtered_distance is not None:
                 label = (
@@ -477,16 +487,24 @@ def yolo_thread():
             except Exception as e:
                 print(f"[YOLO] Loi send distance: {e}")
 
+            #cv2.putText(
+            #    frame,
+            #    f"Send to Pi: {message}",
+            #    (10, 30),
+            #    cv2.FONT_HERSHEY_SIMPLEX,
+            #    0.8,
+            #    (0, 0, 255),
+            #    2
+            #)
             cv2.putText(
                 frame,
-                f"Send to Pi: {message}",
-                (10, 30),
+                f"FPS: {fps_value:.2f}",
+                (10, 110),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
+                0.7,
+                (255, 255, 0),
                 2
             )
-
         display_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
         with view_lock:
