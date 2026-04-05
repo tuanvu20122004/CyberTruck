@@ -138,8 +138,8 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
     if (!can_track) {
         slidingWindow(mask, left_points, right_points, bird_eye_view, minpix);
 
-        left_ok  = (left_points.size()  >= 70);
-        right_ok = (right_points.size() >= 70);
+        left_ok  = (left_points.size()  >= 50);
+        right_ok = (right_points.size() >= 50);
 
         std::cout << "[INIT] left_points=" << left_points.size()
                   << " right_points=" << right_points.size() << std::endl;
@@ -178,7 +178,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
             float x_right = evalX(right_coeffs, height - 1.0f);
             float lane_width = std::fabs(x_right - x_left);
 
-            if (lane_width > 200.0f && lane_width < 500.0f) {
+            if (lane_width > 200.0f && lane_width < 600.0f) {
                 initialized = true;
             } else {
                 initialized = false;
@@ -189,8 +189,8 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
     }
     else {
         // Detect theo lane cũ
-    slidingWindowAdaptive(mask, left_points,  bird_eye_view, prev_left_,  true);
-    slidingWindowAdaptive(mask, right_points, bird_eye_view, prev_right_, false);
+        slidingWindowAdaptive(mask, left_points,  bird_eye_view, prev_left_,  true);
+        slidingWindowAdaptive(mask, right_points, bird_eye_view, prev_right_, false);
 
         left_ok  = (left_points.size()  >= 50);
         right_ok = (right_points.size() >= 50);
@@ -228,51 +228,73 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
         if (left_ok && right_ok) {
             float sum_left = 0.0f;
             float sum_right = 0.0f;
-            int count = 0;
+            float sum_width = 0.0f;
 
-            // lấy mẫu nhiều điểm theo chiều dọc
-            for (int y = height / 2; y < height; y += 20) {
-                float xl = evalX(left_coeffs,  y);
-                float xr = evalX(right_coeffs, y);
+            int count_pair = 0;
+            int count_l = 0;
+            int count_r = 0;
 
-                // lọc giá trị hợp lệ
-                if (xl >= 0 && xl < bird_eye_view.cols &&
-                    xr >= 0 && xr < bird_eye_view.cols) {
+            // lấy mẫu từ nửa dưới ảnh đến gần đáy
+            for (int y = height / 2; y < height; y += 10) {
+                float xl = evalX(left_coeffs,  static_cast<float>(y));
+                float xr = evalX(right_coeffs, static_cast<float>(y));
+
+                bool left_valid  = (xl >= 0.0f && xl < bird_eye_view.cols);
+                bool right_valid = (xr >= 0.0f && xr < bird_eye_view.cols);
+
+                if (left_valid) {
                     sum_left += xl;
+                    count_l++;
+                }
+
+                if (right_valid) {
                     sum_right += xr;
-                    count++;
+                    count_r++;
+                }
+
+                // chỉ cộng width khi cả 2 cùng hợp lệ tại cùng y
+                if (left_valid && right_valid) {
+                    sum_width += std::fabs(xr - xl);
+                    count_pair++;
                 }
             }
 
-            if (count > 0) {
-                float avg_left  = sum_left / count;
-                float avg_right = sum_right / count;
+            if (count_l > 0 && count_r > 0 && count_pair > 0) {
+                float avg_left  = sum_left / static_cast<float>(count_l);
+                float avg_right = sum_right / static_cast<float>(count_r);
+                float lane_width_avg = sum_width / static_cast<float>(count_pair);
 
-                float lane_width = std::fabs(avg_right - avg_left);
+                float center = bird_eye_view.cols / 2.0f;
 
-                std::cout << "AVG_LEFT: " << avg_left
-                        << " AVG_RIGHT: " << avg_right
-                        << " LANE_WIDTH: " << lane_width << std::endl;
+                std::cout << "[MERGE CHECK] AVG_LEFT=" << avg_left
+                        << " AVG_RIGHT=" << avg_right
+                        << " AVG_WIDTH=" << lane_width_avg
+                        << " CENTER=" << center << std::endl;
 
-                // ===== CHECK MERGE =====
-                if (lane_width < 100.0f) {
+                // Nếu 2 lane quá gần nhau => khả năng đang cùng bám 1 lane
+                if (lane_width_avg < 250.0f) {
 
-                    float center = bird_eye_view.cols / 2.0f;
-
-                    // lane nằm bên trái
+                    // Cả hai đều nằm bên trái tâm ảnh:
+                    // nhiều khả năng chỉ còn lane trái thật, lane phải bị bám nhầm
                     if (avg_left < center && avg_right < center) {
                         merging_right_flag = true;
+                        std::cout << "[MERGE] Both lanes on LEFT side -> drop RIGHT lane\n";
                     }
-                    // lane nằm bên phải
+                    // Cả hai đều nằm bên phải tâm ảnh:
+                    // nhiều khả năng chỉ còn lane phải thật, lane trái bị bám nhầm
                     else if (avg_left > center && avg_right > center) {
                         merging_left_flag = true;
+                        std::cout << "[MERGE] Both lanes on RIGHT side -> drop LEFT lane\n";
                     }
                     else {
-                        // fallback: chọn lane nào ít điểm hơn để loại
+                        // fallback:
+                        // lane nào ít điểm hơn thì khả năng là lane bám nhầm
                         if (left_points.size() >= right_points.size()) {
                             merging_right_flag = true;
+                            std::cout << "[MERGE] Fallback -> drop RIGHT lane\n";
                         } else {
                             merging_left_flag = true;
+                            std::cout << "[MERGE] Fallback -> drop LEFT lane\n";
                         }
                     }
                 }
@@ -301,7 +323,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
 
         if (left_ok) {
             float slope_left = computeLaneSlope(left_coeffs, static_cast<float>(mid_y));
-            if (std::fabs(slope_left) > 0.35f) {
+            if (std::fabs(slope_left) > 4.0f) {
                 error_lane = true;
                 std::cout << "[ERR] slope_left=" << slope_left << std::endl;
             }
@@ -309,7 +331,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
 
         if (right_ok) {
             float slope_right = computeLaneSlope(right_coeffs, static_cast<float>(mid_y));
-            if (std::fabs(slope_right) > 0.35f) {
+            if (std::fabs(slope_right) > 4.0f) {
                 error_lane = true;
                 std::cout << "[ERR] slope_right=" << slope_right << std::endl;
             }
@@ -325,7 +347,8 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
             has_prev_right_ = false;
             prev_left_ = cv::Vec3f(0.0f, 0.0f, 0.0f);
             prev_right_ = cv::Vec3f(0.0f, 0.0f, 0.0f);
-        } else {
+        } 
+        else {
             // Chỉ cập nhật prev khi lane hiện tại còn đáng tin
             if (left_ok) {
                 prev_left_ = left_coeffs;

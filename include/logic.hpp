@@ -6,7 +6,7 @@
 #include "communication.hpp"
 #include "logger.hpp"
 #include "Trans_UDP.hpp"
-#include "RlMpcTuner.hpp"
+// #include "RlMpcTuner.hpp"
 
 #include <opencv2/opencv.hpp>
 #include <atomic>
@@ -25,7 +25,7 @@ private:
     Communication  comm;
     Trans_UDP      udp_send;
     Logger         logger;
-    RlMpcTuner     rl_tuner;
+    // RlMpcTuner     rl_tuner;
 
     // Runtime
     std::atomic<bool> running{true};
