@@ -1,20 +1,23 @@
 #pragma once
-#include <vector>
+
+#include <array>
+#include <cstddef>
+#include <deque>
 
 struct RlMpcState
 {
-    float lateral_error;   // độ lệch ngang so với centerline [m]
-    float yaw_error;       // sai số góc heading [rad]
-    float velocity;        // vận tốc xe [m/s]
-    float curvature;       // độ cong quỹ đạo [1/m]
-    float prev_steering;   // góc lái trước đó [deg]
+    float lateral_error;
+    float yaw_error;
+    float velocity;
+    float curvature;
+    float prev_steering;
 };
 
 struct RlMpcWeights
 {
-    float Q1;   // trọng số phạt lệch ngang
-    float Q2;   // phạt lỗi yaw
-    float R;    // phạt effort/ góc lái, độ gắt của bộ điều khiển
+    float Q1;
+    float Q2;
+    float R;
 };
 
 class RlMpcTuner
@@ -22,32 +25,83 @@ class RlMpcTuner
 public:
     RlMpcTuner();
 
-    //dùng trang thái hiện tại để suy ra bộ trọng số mới cho MPC
+    // Infer online MPC weights from the current state.
+    // The learner only predicts a bounded correction around a safe expert prior.
     RlMpcWeights infer(const RlMpcState& s);
 
-    // Compute reward.
-    float computeReward(const RlMpcState& s,
-                        float steering_deg,
-                        float prev_steering_deg) const;
+    // Hand-crafted expert prior used as imitation anchor.
+    RlMpcWeights getExpertWeights(const RlMpcState& s) const;
 
-    // Cập nhật actor - critic thông qua reward và state kế tiếp
-    void update(float reward, const RlMpcState& next_state);
+    // MPC-like stage cost surrogate (Q-loss proxy).
+    float computeStageCost(const RlMpcState& s,
+                           float steering,
+                           float prev_steering) const;
+
+    // Kept for compatibility with old logging / reward style.
+    float computeReward(const RlMpcState& s,
+                        float steering,
+                        float prev_steering) const;
+
+    // Hybrid online update on learner-induced states (DAgger-lite replay).
+    void update(const RlMpcState& current_state,
+                float steering,
+                float prev_steering);
 
 private:
+    static constexpr std::size_t kFeatureDim = 6;
+    using FeatureVector = std::array<float, kFeatureDim>;
+    using ParameterVector = std::array<float, kFeatureDim>;
+
+    struct TrainingSample
+    {
+        FeatureVector features{};
+        RlMpcWeights expert{};
+        RlMpcWeights target{};
+    };
+
     float clamp(float v, float min_v, float max_v) const;
-    float deg2rad(float deg) const;
+    FeatureVector buildFeatures(const RlMpcState& s) const;
+    float dot(const ParameterVector& w, const FeatureVector& x) const;
 
-    //  tham số của actor, phần sinh ra weight
-    std::vector<float> actor_w_;    
+    RlMpcWeights actorForward(const FeatureVector& features,
+                              const RlMpcWeights& expert) const;
+    RlMpcWeights buildHybridTarget(const RlMpcState& s,
+                                   float steering,
+                                   float prev_steering,
+                                   const RlMpcWeights& expert) const;
 
-    // tham số của critic, phần ước lượng value
-    std::vector<float> critic_w_;
+    void pushSample(const TrainingSample& sample);
+    void trainFromBuffer();
+    void sgdStep(ParameterVector& params,
+                 float raw,
+                 float target_delta,
+                 const FeatureVector& features,
+                 float delta_scale);
 
-    // lưu state và action trước đó
+private:
+    // Three small linear heads that predict bounded corrections around the expert prior.
+    ParameterVector actor_q1_{};
+    ParameterVector actor_q2_{};
+    ParameterVector actor_r_{};
+
+    std::deque<TrainingSample> replay_buffer_;
+
+    std::size_t replay_capacity_;
+    std::size_t batch_size_;
+
+    float lr_actor_;
+    float weight_decay_;
+
+    // Hybrid loss weights.
+    float alpha_imitation_;
+    float beta_q_;
+
+    // Maximum safe correction around the expert prior.
+    float q1_delta_max_;
+    float q2_delta_max_;
+    float r_delta_max_;
+
+    bool has_last_action_;
     RlMpcState last_state_{};
     RlMpcWeights last_action_{};
-
-    float gamma_;       // discount factor
-    float lr_actor_;    //learning rate
-    float lr_critic_;   // learning rate
 };
