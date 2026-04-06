@@ -26,7 +26,7 @@ MpcController::MpcController()
     Q1_(1500.0f),
     Q2_(120.0f),
     R_(5.0f),
-    Ts_(0.071f),
+    Ts_(0.071f),                        //14Hz trong mô hinh noi tai
     initialized_(false),
     solver_(nullptr),
     umin_(-28.0 * M_PI / 180.0),
@@ -68,7 +68,7 @@ void MpcController::init(float Q1_weight, float Q2_weight, float R_weight) {
     Q2_ = Q2_weight;
     R_ = R_weight;
 
-    buildMpcMatrices(0.08f);
+    buildMpcMatrices(0.04f);
 
     if (!solver_) solver_ = std::make_unique<OsqpEigen::Solver>();
     solver_->settings()->setVerbosity(false);

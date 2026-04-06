@@ -6,12 +6,18 @@
 #include "communication.hpp"
 #include "logger.hpp"
 #include "Trans_UDP.hpp"
-// #include "RlMpcTuner.hpp"
-
+#include "DatasetLogger.hpp"
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
 #include <string>
+
+
+enum class RunMode {
+    CollectMpcDataset,
+    PolicyShadow,
+    PolicyControl
+};
 
 class Logic {
 public:
@@ -25,7 +31,9 @@ private:
     Communication  comm;
     Trans_UDP      udp_send;
     Logger         logger;
-    // RlMpcTuner     rl_tuner;
+    DatasetLogger dataset_logger;
+    RunMode mode_;
+    int frame_id_;
 
     // Runtime
     std::atomic<bool> running{true};

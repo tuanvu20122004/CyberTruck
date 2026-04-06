@@ -26,10 +26,11 @@ void bindToCore(int core_id) {
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_send("192.168.1.103", 9996),
-      logger("MPC_Log.txt")
+      udp_send("192.168.1.102", 9996),
+      logger("MPC_RL_Log.txt"),
+      dataset_logger("mpc_expert_dataset.csv"),
+      frame_id_(0)
 {
-    // Init MPC base weights
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
     mpc.debugMatrices();
@@ -39,7 +40,11 @@ Logic::Logic(const std::string& videoPath)
         throw std::runtime_error("LaneDetector not opened");
     }
 
-    std::cout << "[LOGIC] Pure MPC system initialized." << std::endl;
+    if (!dataset_logger.isOpen()) {
+        throw std::runtime_error("Dataset logger not opened");
+    }
+
+    std::cout << "[LOGIC] MPC dataset collection mode." << std::endl;
 }
 
 void Logic::cameraLoop() {
@@ -65,10 +70,13 @@ void Logic::cameraLoop() {
     }
 }
 
-void Logic::controlLoop() {
+void Logic::controlLoop() 
+{
     bindToCore(1);
 
     cv::Mat frame_local;
+    auto last_send = std::chrono::steady_clock::now();
+    float prev_raw_steering = 0.0f;
 
     while (running.load()) {
         {
@@ -85,57 +93,71 @@ void Logic::controlLoop() {
             continue;
         }
 
-        // Chỉ thread này mới xử lý detector để tránh race condition
         detector.processFrame(frame_local);
 
         std::vector<cv::Point> centerline = detector.getCenterline();
         cv::Mat birdEyeView = detector.getBirdEyeView();
         MpcState state = mpc.computeMpcParameters(centerline, birdEyeView);
 
+        cv::Mat bev = detector.getBirdEyeView();
+        if (!bev.empty()) {
+            udp_send.sendFrame(bev, 60);
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        }
+
         auto now = std::chrono::steady_clock::now();
-        static auto last_udp = now;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 50) {
+            last_send = now;
 
-        // =====================
-        // 1. Gửi BEV debug
-        // =====================
-        if (!birdEyeView.empty() &&
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_udp).count() >= 50)
-        {
-            udp_send.sendFrame(birdEyeView, 60);
-            last_udp = now;
+            if (!state.is_valid) {
+                continue;
+            }
+
+            float raw_steering = mpc.computeSteeringAngle(state, desired_velocity);
+
+            float steering_sent = 0.02f * std::pow(raw_steering, 3) + 1.15f * raw_steering;
+
+            if (steering_sent <= -25.0f)
+                steering_sent = -25.0f;
+            else if (steering_sent >= 25.0f)
+                steering_sent = 25.0f;
+
+            int servo = static_cast<int>(std::lround(97.0f + steering_sent));
+            comm.sendCommands(desired_velocity, servo);
+
+            // lấy data
+            DatasetSample sample{};
+            sample.timestamp_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            sample.frame_id = frame_id_++;
+            sample.is_valid = 1;
+
+            sample.lateral_deviation = static_cast<float>(state.lateral_deviation);
+            sample.yaw_angle = static_cast<float>(state.yaw_angle);
+
+            sample.curvature_0 = state.curvature.size() > 0 ? state.curvature[0] : 0.0f;
+            sample.curvature_1 = state.curvature.size() > 1 ? state.curvature[1] : 0.0f;
+            sample.curvature_2 = state.curvature.size() > 2 ? state.curvature[2] : 0.0f;
+            sample.curvature_3 = state.curvature.size() > 3 ? state.curvature[3] : 0.0f;
+
+            sample.velocity = desired_velocity;
+            sample.prev_steering = prev_raw_steering;
+            sample.expert_steering = raw_steering;
+            sample.steering_sent = steering_sent;
+            sample.servo_command = servo;
+            sample.lane_width_px = detector.getLaneWidthPx();
+
+            dataset_logger.logSample(sample);
+
+            prev_raw_steering = raw_steering;
+
+            std::cout << "[DATASET] frame=" << sample.frame_id
+                      << " ey=" << sample.lateral_deviation
+                      << " yaw=" << sample.yaw_angle
+                      << " u*=" << sample.expert_steering
+                      << std::endl;
         }
-
-        // =====================
-        // 2. Pure MPC control
-        // =====================
-        if (!state.is_valid) {
-            continue;
-        }
-
-        float steering = mpc.computeSteeringAngle(state, desired_velocity);
-
-        // Nội suy thực nghiệm
-        steering = 0.018f * std::pow(steering, 3) + 1.5f * steering;
-
-        // Clamp theo cơ cấu lái
-        if (steering < -25.0f) steering = -25.0f;
-        if (steering >  25.0f) steering =  25.0f;
-
-        std::cout << "[MPC] steer=" << steering << std::endl;
-
-        int servo = static_cast<int>(std::lround(97.0f + steering));
-        comm.sendCommands(desired_velocity, servo);
-
-        // Log thuần MPC
-        std::stringstream ss;
-        ss << "lat=" << state.lateral_deviation
-           << ", yaw=" << state.yaw_angle
-           << ", vel=" << desired_velocity
-           << ", curv=" << (state.curvature.empty() ? 0.0f : state.curvature[0])
-           << ", steer=" << steering
-           << ", servo=" << servo;
-
-        logger.log(ss.str(), 0.0);
     }
 }
 
