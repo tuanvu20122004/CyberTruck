@@ -79,6 +79,16 @@ Logic::Logic(const std::string& videoPath)
     //std::cout << "[LOGIC] Planner initialized. Vx = " << desired_velocity << " m/s" << std::endl;
 }
 
+void Logic::setControlMode(ControlMode mode)
+{
+    control_mode = mode;
+
+    if (control_mode == ControlMode::MPC)
+        std::cout << "[LOGIC] Using MPC controller\n";
+    else
+        std::cout << "[LOGIC] Using Pure Pursuit controller\n";
+}
+
 void Logic::run()
 {
     std::ofstream log_file("planner_log.txt", std::ios::out | std::ios::trunc);
@@ -239,14 +249,39 @@ void Logic::run()
                 if (state.is_valid)
                 {
                     float steering;
-                    if(distance >1.1f){
-                        steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                    if(control_mode == ControlMode::MPC)
+                    {
+                        if(distance >1.1f){
+                            steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                        }
+                        else
+                            steering = mpc.computeSteeringAngle(state, desired_velocity);
+                    }
+                    else // PURE_PURSUIT
+                    {
+                            if (distance > 1.1f)
+                            steering = pure_pursuit.computeSteeringAngle(
+                                base_centerline,
+                                birdEyeView.size(),
+                                desired_velocity
+                            );
+                        else
+                            steering = pure_pursuit.computeSteeringAngle(
+                                target_centerline,
+                                birdEyeView.size(),
+                                desired_velocity
+                            );
+                    }
+                    
+                    if (control_mode == ControlMode::MPC)
+                    {
+                        steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
                     }
                     else
-                        steering = mpc.computeSteeringAngle(state, desired_velocity);
-                    
-                        
-                    steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
+                    {
+                        // Pure Pursuit 
+                        steering = steering;
+                    }
 
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;

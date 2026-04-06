@@ -26,7 +26,7 @@ class Logic
 public:
     explicit Logic(const std::string& videoPath);
     void run();
-
+    void setControlMode(ControlMode mode);
 private:
     float computeSteering(
         const std::vector<cv::Point>& base_centerline,
