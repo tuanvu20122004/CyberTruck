@@ -3,14 +3,13 @@
 #include <algorithm>
 
 PurePursuitController::PurePursuitController()
-    : wheelbase_m_(0.432f),        // chiều dài xe =>> tone lại
+    : wheelbase_m_(0.2515f),        // chiều dài xe =>> tone lại
       lookahead_m_(0.35f),          //ld: tone lại tùy vào bám gắt hay ko
-      pixel_per_meter_(1000.0f),     // tone lại
-      rear_axle_offset_px_(220.0f),  // khoảng cách trục sau so vs ảnh =>> tone lại
+      pixel_per_meter_(250.0f),     // tone lại
+      rear_axle_offset_px_(40.0f),  // khoảng cách trục sau so vs ảnh =>> tone lại
       max_steering_deg_(25.0f)
 {
 }
-
 void PurePursuitController::setWheelbase(float wheelbase_m)
 {
     wheelbase_m_ = wheelbase_m;
