@@ -26,6 +26,7 @@ void bindToCore(int core_id)
     }
 }
 
+// nội suy góc đánh lái
 float remapSteeringForActuator(float raw_steering)
 {
     float sent = 0.02f * std::pow(raw_steering, 3.0f) + 1.15f * raw_steering;
@@ -39,7 +40,7 @@ Logic::Logic(const std::string& videoPath, const std::string& policyPath)
     : detector(videoPath, 640, 480),
       mpc(),
       comm("/dev/ttyACM0", 115200),
-      udp_send("192.168.1.102", 9996),
+      udp_send("192.168.1.100", 9996),
       policy_model(policyPath),
       logger("policy_shadow_log.txt")
 {
@@ -73,6 +74,7 @@ void Logic::openShadowCsv(const std::string& filename)
                << "steering_sent_mpc,servo_command,lane_width_px\n";
 }
 
+// ghi dữ liệu từ MPC vào CSV
 void Logic::logShadowRow(long long timestamp_ms,
                          int frame_id,
                          const MpcState& state,
@@ -176,9 +178,11 @@ void Logic::controlLoop()
             continue;
         }
 
+        // build đầu vào vào bộ model
         const PolicyModel::FeatureVector features =
             PolicyModel::buildFeatures(state, desired_velocity, prev_raw_steering);
 
+        // tính góc lái dự đoán và góc lái từ bộ mpc
         const float raw_steering_pred = policy_model.infer(features);
         const float raw_steering_mpc = mpc.computeSteeringAngle(state, desired_velocity);
 
