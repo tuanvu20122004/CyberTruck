@@ -72,6 +72,14 @@ void Logic::openShadowCsv(const std::string& filename)
                << "velocity,prev_steering_raw,"
                << "raw_steering_mpc,raw_steering_pred,raw_abs_error,"
                << "steering_sent_mpc,servo_command,lane_width_px\n";
+    #if 0           
+    shadow_csv << "timestamp_ms,frame_id,is_valid,"
+           << "lateral_deviation,yaw_angle,"
+           << "curvature_0,curvature_1,curvature_2,curvature_3,"
+           << "velocity,prev_steering_raw,"
+           << "raw_steering_policy,raw_steering_expert,raw_abs_error,"
+           << "steering_sent,servo_command,lane_width_px\n";
+    #endif
 }
 
 // ghi dữ liệu từ MPC vào CSV
@@ -108,7 +116,42 @@ void Logic::logShadowRow(long long timestamp_ms,
                << lane_width_px
                << '\n';
 }
+// ghi dữ liệu từ Policy vào CSV (dành cho chế độ policy, hiện đang để shadow mode nên comment lại)
+#if 0
+void Logic::logShadowRow(long long timestamp_ms,
+                         int frame_id,
+                         const MpcState& state,
+                         float prev_raw_steering,
+                         float raw_steering_policy,   // u_policy
+                         float raw_steering_expert,   // u_expert (MPC)
+                         float steering_sent,
+                         int servo_command,
+                         float lane_width_px)
+{
+    if (!shadow_csv.is_open()) {
+        return;
+    }
 
+    shadow_csv << timestamp_ms << ','
+               << frame_id << ','
+               << 1 << ','
+               << state.lateral_deviation << ','
+               << state.yaw_angle << ','
+               << (state.curvature.size() > 0 ? state.curvature[0] : 0.0f) << ','
+               << (state.curvature.size() > 1 ? state.curvature[1] : 0.0f) << ','
+               << (state.curvature.size() > 2 ? state.curvature[2] : 0.0f) << ','
+               << (state.curvature.size() > 3 ? state.curvature[3] : 0.0f) << ','
+               << desired_velocity << ','
+               << prev_raw_steering << ','
+               << raw_steering_policy << ','    // policy
+               << raw_steering_expert << ','    // expert (MPC)
+               << std::abs(raw_steering_expert - raw_steering_policy) << ','
+               << steering_sent << ','
+               << servo_command << ','
+               << lane_width_px
+               << '\n';
+}
+#endif
 void Logic::cameraLoop()
 {
     bindToCore(0);
@@ -190,7 +233,12 @@ void Logic::controlLoop()
         const float steering_sent_mpc = remapSteeringForActuator(raw_steering_mpc);
         const int servo_command = static_cast<int>(std::lround(97.0f + steering_sent_mpc));
         comm.sendCommands(desired_velocity, servo_command);
-
+        // Polily mode: xe van lai bang policy, MPC chi du doan va duoc ghi log.
+        #if 0
+        const float steering_sent_policy = remapSteeringForActuator(raw_steering_pred);
+        const int servo_command_policy = static_cast<int>(std::lround(97.0f + steering_sent_policy));
+        comm.sendCommands(desired_velocity, servo_command_policy);
+        #endif
         const long long timestamp_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -205,7 +253,17 @@ void Logic::controlLoop()
                      steering_sent_mpc,
                      servo_command,
                      detector.getLaneWidthPx());
-
+        #if 0
+        logShadowRow(timestamp_ms,
+             current_frame_id,
+             state,
+             prev_raw_steering,
+             raw_steering_pred,   // u_policy
+             raw_steering_mpc,    // u_expert
+             steering_sent_mpc,
+             servo_command,
+             detector.getLaneWidthPx());
+        #endif
         std::ostringstream ss;
         ss << std::fixed << std::setprecision(4)
            << "shadow raw_mpc=" << raw_steering_mpc
@@ -223,6 +281,8 @@ void Logic::controlLoop()
 
         // Prev steering cho feature o che do shadow nen la lenh thuc su da duoc thi hanh.
         prev_raw_steering = raw_steering_mpc;
+        // Prev steering cho feature o che do policy nen la lenh du doan cua policy.
+        //prev_raw_steering = raw_steering_pred;
     }
 }
 
