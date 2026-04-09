@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include "logic_shadow_mode.hpp"
 
+
 int main(int argc, char* argv[])
 {
     std::cout << "=== Shadow mode: policy prediction + MPC control ===\n";
