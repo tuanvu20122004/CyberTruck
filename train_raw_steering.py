@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Train a raw-steering behavioral-cloning policy from MPC dataset CSV files.
+"""Fine-tune an existing raw-steering policy using old MPC datasets and new DAgger rollout logs.
 
-This script:
-1. Loads one or more CSV datasets collected from the vehicle.
-2. Filters invalid / outlier rows.
-3. Splits each source file chronologically into train/val/test to reduce leakage.
-4. Trains a small MLP regressor to predict raw MPC steering.
-5. Saves metrics, plots, a PyTorch checkpoint, and a JSON export suitable for C++.
+This script is designed for the current project pipeline:
+- old training datasets use columns like `prev_steering`, `expert_steering`
+- new DAgger rollout logs use columns like `prev_steering_raw`, `raw_steering_expert`
+- the previous model can be loaded either from `model_raw_steering.pt` or from
+  `policy_export.json`
 
-Example:
-    python train_raw_steering.py \
-        --csv /mnt/data/dataset_1.csv /mnt/data/dataset_2.csv \
-        --output-dir /mnt/data/raw_steering_run
+Main features:
+1. Load one or more old expert CSV datasets.
+2. Load one or more DAgger CSV logs and convert them to the training schema.
+3. Aggregate all data into a single dataframe.
+4. Fine-tune from an existing model with a small learning rate.
+5. Optionally upweight DAgger / fallback samples.
+6. Export an updated PyTorch checkpoint + JSON for C++ runtime.
+
+Example (PowerShell one line):
+    python finetune_with_dagger.py --base-csv dataset_1.csv dataset_2.csv dataset_3.csv dataset_4.csv \
+        --dagger-csv policy_dagger_log.csv --resume policy_export.json --output-dir finetune_run
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 FEATURE_COLUMNS: List[str] = [
     "lateral_deviation",
@@ -41,7 +47,6 @@ FEATURE_COLUMNS: List[str] = [
     "prev_steering",
 ]
 TARGET_COLUMN = "expert_steering"
-OPTIONAL_COLUMNS = ["timestamp_ms", "frame_id", "steering_sent", "servo_command", "lane_width_px"]
 
 
 class MLPRegressor(nn.Module):
@@ -65,28 +70,34 @@ class MLPRegressor(nn.Module):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a raw-steering policy from MPC CSV datasets")
-    parser.add_argument("--csv", nargs="+", required=True, help="Input CSV dataset paths")
-    parser.add_argument("--output-dir", default="raw_steering_run", help="Directory to save outputs")
-    parser.add_argument("--epochs", type=int, default=300, help="Maximum number of training epochs")
+    parser = argparse.ArgumentParser(description="Fine-tune a raw-steering policy with DAgger data")
+    parser.add_argument("--base-csv", nargs="*", default=[], help="Old expert CSV files from MPC-only collection")
+    parser.add_argument("--dagger-csv", nargs="*", default=[], help="New DAgger rollout CSV files")
+    parser.add_argument("--resume", required=True, help="Path to old model checkpoint (.pt) or policy_export.json")
+    parser.add_argument("--output-dir", default="finetune_dagger_run", help="Directory to save outputs")
+    parser.add_argument("--epochs", type=int, default=80, help="Max fine-tuning epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for fine-tuning")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="AdamW weight decay")
-    parser.add_argument("--hidden-dims", default="32,32", help="Comma-separated hidden sizes, e.g. 32,32")
-    parser.add_argument("--activation", choices=["tanh", "relu"], default="tanh", help="Hidden activation")
-    parser.add_argument("--dropout", type=float, default=0.0, help="Reserved for future use; currently ignored")
-    parser.add_argument("--patience", type=int, default=35, help="Early stopping patience on validation RMSE")
+    parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Training device")
     parser.add_argument("--train-frac", type=float, default=0.8, help="Per-file train fraction")
     parser.add_argument("--val-frac", type=float, default=0.1, help="Per-file validation fraction")
-    parser.add_argument("--max-abs-lateral", type=float, default=2.0, help="Filter |lateral_deviation| > threshold")
-    parser.add_argument("--max-abs-yaw", type=float, default=1.2, help="Filter |yaw_angle| > threshold")
-    parser.add_argument("--max-abs-curvature", type=float, default=5.0, help="Filter any |curvature_i| > threshold")
-    parser.add_argument("--max-abs-prev-steering", type=float, default=28.0, help="Filter |prev_steering| > threshold")
-    parser.add_argument("--max-abs-target", type=float, default=28.0, help="Filter |expert_steering| > threshold")
+    parser.add_argument("--num-threads", type=int, default=1, help="Torch CPU threads")
+
+    parser.add_argument("--max-abs-lateral", type=float, default=2.0)
+    parser.add_argument("--max-abs-yaw", type=float, default=1.2)
+    parser.add_argument("--max-abs-curvature", type=float, default=5.0)
+    parser.add_argument("--max-abs-prev-steering", type=float, default=28.0)
+    parser.add_argument("--max-abs-target", type=float, default=28.0)
+
+    parser.add_argument("--dagger-weight", type=float, default=2.0, help="Sample weight for DAgger rows")
+    parser.add_argument("--fallback-weight", type=float, default=3.0, help="Extra sample weight when fallback_to_mpc=1")
+    parser.add_argument("--use-weighted-sampler", action="store_true", help="Use weighted sampling instead of plain shuffle")
+    parser.add_argument("--only-fallback", action="store_true", help="Train only on DAgger rows with fallback_to_mpc=1")
+    parser.add_argument("--keep-policy-columns", action="store_true", help="Keep extra policy/debug columns in saved merged CSV")
     parser.add_argument("--no-plots", action="store_true", help="Skip saving plots")
-    parser.add_argument("--num-threads", type=int, default=1, help="Torch CPU threads to use")
     return parser.parse_args()
 
 
@@ -135,30 +146,150 @@ def _ensure_minimum_split_counts(n_rows: int, train_frac: float, val_frac: float
     return n_train, n_val, n_test
 
 
-def load_and_filter(csv_paths: Sequence[str], args: argparse.Namespace) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    frames: List[pd.DataFrame] = []
-    source_stats: Dict[str, Dict[str, int]] = {}
+def read_json_model(path: Path) -> Dict[str, object]:
+    with path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    return cfg
 
-    for csv_path in csv_paths:
+
+def model_from_json(json_cfg: Dict[str, object]) -> Tuple[MLPRegressor, Dict[str, np.ndarray], Dict[str, object]]:
+    hidden_dims = [int(v) for v in json_cfg["hidden_dims"]]
+    activation = str(json_cfg["activation"])
+    model = MLPRegressor(len(FEATURE_COLUMNS), hidden_dims, activation=activation)
+
+    linear_layers: List[nn.Linear] = [m for m in model.modules() if isinstance(m, nn.Linear)]
+    exported_layers = json_cfg["layers"]
+    if len(linear_layers) != len(exported_layers):
+        raise ValueError("JSON layer count does not match model architecture")
+
+    with torch.no_grad():
+        for layer_mod, layer_cfg in zip(linear_layers, exported_layers):
+            w = torch.tensor(layer_cfg["weight"], dtype=torch.float32)
+            b = torch.tensor(layer_cfg["bias"], dtype=torch.float32)
+            if tuple(layer_mod.weight.shape) != tuple(w.shape):
+                raise ValueError(f"Weight shape mismatch: model {tuple(layer_mod.weight.shape)} vs JSON {tuple(w.shape)}")
+            if tuple(layer_mod.bias.shape) != tuple(b.shape):
+                raise ValueError(f"Bias shape mismatch: model {tuple(layer_mod.bias.shape)} vs JSON {tuple(b.shape)}")
+            layer_mod.weight.copy_(w)
+            layer_mod.bias.copy_(b)
+
+    norm_cfg = json_cfg["normalization"]
+    norm = {
+        "x_mean": np.asarray(norm_cfg["feature_mean"], dtype=np.float32),
+        "x_std": np.asarray(norm_cfg["feature_std"], dtype=np.float32),
+        "y_mean": np.asarray([norm_cfg["target_mean"]], dtype=np.float32),
+        "y_std": np.asarray([norm_cfg["target_std"]], dtype=np.float32),
+    }
+
+    meta = {
+        "hidden_dims": hidden_dims,
+        "activation": activation,
+        "feature_columns": list(json_cfg["feature_columns"]),
+        "target_column": str(json_cfg.get("target", TARGET_COLUMN)),
+        "source_format": "json",
+    }
+    return model, norm, meta
+
+
+def load_resume_model(resume_path: str) -> Tuple[MLPRegressor, Dict[str, np.ndarray], Dict[str, object]]:
+    path = Path(resume_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Resume model not found: {path}")
+
+    if path.suffix.lower() == ".json":
+        cfg = read_json_model(path)
+        return model_from_json(cfg)
+
+    ckpt = torch.load(path, map_location="cpu")
+    hidden_dims = [int(v) for v in ckpt["hidden_dims"]]
+    activation = str(ckpt["activation"])
+    model = MLPRegressor(len(FEATURE_COLUMNS), hidden_dims, activation=activation)
+    model.load_state_dict(ckpt["state_dict"])
+
+    raw_norm = ckpt["normalization"]
+    norm = {
+        "x_mean": np.asarray(raw_norm["x_mean"], dtype=np.float32),
+        "x_std": np.asarray(raw_norm["x_std"], dtype=np.float32),
+        "y_mean": np.asarray(raw_norm["y_mean"], dtype=np.float32).reshape(1),
+        "y_std": np.asarray(raw_norm["y_std"], dtype=np.float32).reshape(1),
+    }
+    meta = {
+        "hidden_dims": hidden_dims,
+        "activation": activation,
+        "feature_columns": list(ckpt.get("feature_columns", FEATURE_COLUMNS)),
+        "target_column": str(ckpt.get("target_column", TARGET_COLUMN)),
+        "source_format": "pt",
+    }
+    return model, norm, meta
+
+
+def sanitize_base_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    required = FEATURE_COLUMNS + [TARGET_COLUMN]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Base dataset {source_name} missing columns: {missing}")
+    out = df.copy()
+    out["dataset_role"] = "base"
+    out["source_file"] = source_name
+    if "fallback_to_mpc" not in out.columns:
+        out["fallback_to_mpc"] = 0
+    return out
+
+
+def sanitize_dagger_df(df: pd.DataFrame, source_name: str, args: argparse.Namespace) -> pd.DataFrame:
+    rename_map = {
+        "prev_steering_raw": "prev_steering",
+        "raw_steering_expert": "expert_steering",
+    }
+    out = df.rename(columns=rename_map).copy()
+
+    required = FEATURE_COLUMNS + [TARGET_COLUMN]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"DAgger dataset {source_name} missing columns after rename: {missing}")
+
+    if "is_valid" in out.columns:
+        out = out[out["is_valid"] == 1].copy()
+    if args.only_fallback:
+        if "fallback_to_mpc" not in out.columns:
+            raise ValueError("--only-fallback requested but fallback_to_mpc column is missing")
+        out = out[out["fallback_to_mpc"] == 1].copy()
+
+    out["dataset_role"] = "dagger"
+    out["source_file"] = source_name
+    if "fallback_to_mpc" not in out.columns:
+        out["fallback_to_mpc"] = 0
+    return out
+
+
+def load_and_merge_datasets(args: argparse.Namespace) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    if not args.base_csv and not args.dagger_csv:
+        raise ValueError("Provide at least one dataset via --base-csv and/or --dagger-csv")
+
+    frames: List[pd.DataFrame] = []
+    stats: Dict[str, object] = {"base": {}, "dagger": {}}
+
+    for csv_path in args.base_csv:
         path = Path(csv_path)
         if not path.exists():
-            raise FileNotFoundError(f"CSV not found: {path}")
+            raise FileNotFoundError(f"Base CSV not found: {path}")
+        df = pd.read_csv(path, on_bad_lines='skip', engine='python')
+        stats["base"][path.name] = {"rows_before": int(len(df))}
+        df = sanitize_base_df(df, path.name)
+        stats["base"][path.name]["rows_after_schema"] = int(len(df))
+        frames.append(df)
 
-        df = pd.read_csv(path)
-        df["source_file"] = path.name
-        source_stats[path.name] = {"rows_before": int(len(df))}
+    for csv_path in args.dagger_csv:
+        path = Path(csv_path)
+        if not path.exists():
+            raise FileNotFoundError(f"DAgger CSV not found: {path}")
+        df = pd.read_csv(path, on_bad_lines='skip', engine='python')
+        stats["dagger"][path.name] = {"rows_before": int(len(df))}
+        df = sanitize_dagger_df(df, path.name, args)
+        stats["dagger"][path.name]["rows_after_schema"] = int(len(df))
         frames.append(df)
 
     df_all = pd.concat(frames, ignore_index=True)
-    required_cols = set(FEATURE_COLUMNS + [TARGET_COLUMN, "source_file"])
-    missing_cols = sorted(required_cols - set(df_all.columns))
-    if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
-
-    rows_before = int(len(df_all))
-    if "is_valid" in df_all.columns:
-        df_all = df_all[df_all["is_valid"] == 1]
-
     df_all = df_all.replace([np.inf, -np.inf], np.nan)
     df_all = df_all.dropna(subset=FEATURE_COLUMNS + [TARGET_COLUMN])
 
@@ -170,17 +301,17 @@ def load_and_filter(csv_paths: Sequence[str], args: argparse.Namespace) -> Tuple
     mask &= np.abs(df_all["prev_steering"].to_numpy()) <= args.max_abs_prev_steering
     mask &= np.abs(df_all[TARGET_COLUMN].to_numpy()) <= args.max_abs_target
 
-    df_all = df_all.loc[mask].copy()
-    df_all.reset_index(drop=True, inplace=True)
+    df_all = df_all.loc[mask].copy().reset_index(drop=True)
 
-    for src_name, group in df_all.groupby("source_file"):
-        source_stats.setdefault(src_name, {})["rows_after"] = int(len(group))
+    if not args.keep_policy_columns:
+        keep_cols = list(dict.fromkeys(FEATURE_COLUMNS + [TARGET_COLUMN, "dataset_role", "source_file", "fallback_to_mpc", "timestamp_ms", "frame_id"]))
+        keep_cols = [c for c in keep_cols if c in df_all.columns]
+        df_all = df_all[keep_cols].copy()
 
-    filter_stats = {
-        "rows_before_total": rows_before,
-        "rows_after_total": int(len(df_all)),
-        "rows_removed_total": int(rows_before - len(df_all)),
-        "source_stats": source_stats,
+    summary = {
+        "n_rows_total": int(len(df_all)),
+        "n_rows_base": int((df_all["dataset_role"] == "base").sum()) if "dataset_role" in df_all.columns else 0,
+        "n_rows_dagger": int((df_all["dataset_role"] == "dagger").sum()) if "dataset_role" in df_all.columns else 0,
         "feature_columns": FEATURE_COLUMNS,
         "target_column": TARGET_COLUMN,
         "filters": {
@@ -190,8 +321,9 @@ def load_and_filter(csv_paths: Sequence[str], args: argparse.Namespace) -> Tuple
             "max_abs_prev_steering": args.max_abs_prev_steering,
             "max_abs_target": args.max_abs_target,
         },
+        "input_stats": stats,
     }
-    return df_all, filter_stats
+    return df_all, summary
 
 
 def split_per_source(df: pd.DataFrame, train_frac: float, val_frac: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -205,7 +337,6 @@ def split_per_source(df: pd.DataFrame, train_frac: float, val_frac: float) -> Tu
         if sort_columns:
             group = group.sort_values(sort_columns)
         group = group.reset_index(drop=True)
-
         n_train, n_val, _ = _ensure_minimum_split_counts(len(group), train_frac, val_frac)
         train_parts.append(group.iloc[:n_train].copy())
         val_parts.append(group.iloc[n_train:n_train + n_val].copy())
@@ -215,26 +346,6 @@ def split_per_source(df: pd.DataFrame, train_frac: float, val_frac: float) -> Tu
     val_df = pd.concat(val_parts, ignore_index=True)
     test_df = pd.concat(test_parts, ignore_index=True)
     return train_df, val_df, test_df
-
-
-def compute_normalization(train_df: pd.DataFrame) -> Dict[str, np.ndarray]:
-    x_train = train_df[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-    y_train = train_df[TARGET_COLUMN].to_numpy(dtype=np.float32).reshape(-1, 1)
-
-    x_mean = x_train.mean(axis=0)
-    x_std = x_train.std(axis=0)
-    x_std = np.where(x_std < 1e-8, 1.0, x_std)
-
-    y_mean = y_train.mean(axis=0)
-    y_std = y_train.std(axis=0)
-    y_std = np.where(y_std < 1e-8, 1.0, y_std)
-
-    return {
-        "x_mean": x_mean,
-        "x_std": x_std,
-        "y_mean": y_mean,
-        "y_std": y_std,
-    }
 
 
 def dataframe_to_tensors(df: pd.DataFrame, norm: Dict[str, np.ndarray]) -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
@@ -260,24 +371,30 @@ def predict_raw(model: nn.Module, x_tensor: torch.Tensor, norm: Dict[str, np.nda
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     y_true = y_true.reshape(-1)
     y_pred = y_pred.reshape(-1)
-
     err = y_pred - y_true
     mae = float(np.mean(np.abs(err)))
     rmse = float(np.sqrt(np.mean(err ** 2)))
     max_abs_err = float(np.max(np.abs(err)))
-
     denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
-    if denom < 1e-12:
-        r2 = 0.0
-    else:
-        r2 = float(1.0 - np.sum(err ** 2) / denom)
+    r2 = 0.0 if denom < 1e-12 else float(1.0 - np.sum(err ** 2) / denom)
+    return {"mae": mae, "rmse": rmse, "max_abs_err": max_abs_err, "r2": r2}
 
-    return {
-        "mae": mae,
-        "rmse": rmse,
-        "max_abs_err": max_abs_err,
-        "r2": r2,
-    }
+
+def make_train_loader(train_df: pd.DataFrame, x_t: torch.Tensor, y_t: torch.Tensor, args: argparse.Namespace) -> DataLoader:
+    ds = TensorDataset(x_t, y_t)
+
+    if not args.use_weighted_sampler:
+        return DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
+
+    weights = np.ones(len(train_df), dtype=np.float32)
+    if "dataset_role" in train_df.columns:
+        weights = np.where(train_df["dataset_role"].to_numpy() == "dagger", args.dagger_weight, 1.0).astype(np.float32)
+    if "fallback_to_mpc" in train_df.columns:
+        fb = train_df["fallback_to_mpc"].to_numpy().astype(np.float32)
+        weights *= np.where(fb > 0.5, args.fallback_weight, 1.0).astype(np.float32)
+
+    sampler = WeightedRandomSampler(weights=torch.tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
+    return DataLoader(ds, batch_size=args.batch_size, sampler=sampler, drop_last=False)
 
 
 def train_model(
@@ -307,13 +424,11 @@ def train_model(
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
-
             optimizer.zero_grad(set_to_none=True)
             preds = model(xb)
             loss = criterion(preds, yb)
             loss.backward()
             optimizer.step()
-
             epoch_losses.append(float(loss.item()))
 
         train_loss = float(np.mean(epoch_losses)) if epoch_losses else float("nan")
@@ -357,10 +472,9 @@ def export_model_to_json(
     norm: Dict[str, np.ndarray],
     hidden_dims: Sequence[int],
     activation: str,
-    filter_stats: Dict[str, object],
+    training_summary: Dict[str, object],
 ) -> None:
     linear_layers: List[nn.Linear] = [m for m in model.modules() if isinstance(m, nn.Linear)]
-
     export = {
         "format_version": 1,
         "model_type": "mlp_regressor",
@@ -381,9 +495,8 @@ def export_model_to_json(
             }
             for layer in linear_layers
         ],
-        "filter_stats": filter_stats,
+        "training_summary": training_summary,
     }
-
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(export, f, indent=2)
 
@@ -398,7 +511,7 @@ def save_plots(output_dir: Path, history: List[Dict[str, float]], y_true: np.nda
     plt.plot(hist_df["epoch"], hist_df["val_rmse_raw"], label="val RMSE (raw steering)")
     plt.xlabel("Epoch")
     plt.ylabel("Loss / RMSE")
-    plt.title("Training history")
+    plt.title("Fine-tuning history")
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_dir / "training_history.png", dpi=150)
@@ -409,8 +522,8 @@ def save_plots(output_dir: Path, history: List[Dict[str, float]], y_true: np.nda
     lim_min = float(min(np.min(y_true), np.min(y_pred)))
     lim_max = float(max(np.max(y_true), np.max(y_pred)))
     plt.plot([lim_min, lim_max], [lim_min, lim_max])
-    plt.xlabel("Expert steering (raw)")
-    plt.ylabel("Predicted steering (raw)")
+    plt.xlabel("Expert steering")
+    plt.ylabel("Predicted steering")
     plt.title("Test predictions vs expert")
     plt.tight_layout()
     plt.savefig(output_dir / "test_scatter.png", dpi=150)
@@ -441,29 +554,40 @@ def main() -> None:
     except RuntimeError:
         pass
     device = pick_device(args.device)
-    hidden_dims = [int(part.strip()) for part in args.hidden_dims.split(",") if part.strip()]
-    if not hidden_dims:
-        raise ValueError("At least one hidden layer size is required")
 
-    df_all, filter_stats = load_and_filter(args.csv, args)
+    model, old_norm, resume_meta = load_resume_model(args.resume)
+    if resume_meta["feature_columns"] != FEATURE_COLUMNS:
+        raise ValueError(
+            f"Resume model feature order mismatch. Got {resume_meta['feature_columns']}, expected {FEATURE_COLUMNS}"
+        )
+    if resume_meta["target_column"] != TARGET_COLUMN:
+        raise ValueError(
+            f"Resume model target mismatch. Got {resume_meta['target_column']}, expected {TARGET_COLUMN}"
+        )
+
+    df_all, dataset_summary = load_and_merge_datasets(args)
     if len(df_all) < 30:
         raise ValueError(f"Too few rows after filtering: {len(df_all)}")
 
     train_df, val_df, test_df = split_per_source(df_all, args.train_frac, args.val_frac)
 
-    norm = compute_normalization(train_df)
+    # Recompute normalization from aggregated TRAIN split.
+    x_train = train_df[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+    y_train = train_df[TARGET_COLUMN].to_numpy(dtype=np.float32).reshape(-1, 1)
+    norm = {
+        "x_mean": x_train.mean(axis=0),
+        "x_std": np.where(x_train.std(axis=0) < 1e-8, 1.0, x_train.std(axis=0)),
+        "y_mean": y_train.mean(axis=0),
+        "y_std": np.where(y_train.std(axis=0) < 1e-8, 1.0, y_train.std(axis=0)),
+    }
+
     train_x_t, train_y_t, _, train_y_raw = dataframe_to_tensors(train_df, norm)
     val_x_t, val_y_t, _, val_y_raw = dataframe_to_tensors(val_df, norm)
     test_x_t, test_y_t, _, test_y_raw = dataframe_to_tensors(test_df, norm)
 
-    train_loader = DataLoader(
-        TensorDataset(train_x_t, train_y_t),
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=False,
-    )
+    train_loader = make_train_loader(train_df, train_x_t, train_y_t, args)
+    model = model.to(device)
 
-    model = MLPRegressor(len(FEATURE_COLUMNS), hidden_dims, activation=args.activation).to(device)
     model, history = train_model(
         model=model,
         train_loader=train_loader,
@@ -491,10 +615,27 @@ def main() -> None:
             "val": int(len(val_df)),
             "test": int(len(test_df)),
         },
+        "resume_model": args.resume,
+        "resume_format": resume_meta["source_format"],
         "device": str(device),
-        "hidden_dims": hidden_dims,
-        "activation": args.activation,
+        "hidden_dims": resume_meta["hidden_dims"],
+        "activation": resume_meta["activation"],
         "seed": args.seed,
+        "fine_tune": {
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "weight_decay": args.weight_decay,
+            "dagger_weight": args.dagger_weight,
+            "fallback_weight": args.fallback_weight,
+            "use_weighted_sampler": bool(args.use_weighted_sampler),
+            "only_fallback": bool(args.only_fallback),
+        },
+        "old_normalization": {
+            "x_mean": old_norm["x_mean"].astype(float).tolist(),
+            "x_std": old_norm["x_std"].astype(float).tolist(),
+            "y_mean": old_norm["y_mean"].astype(float).tolist(),
+            "y_std": old_norm["y_std"].astype(float).tolist(),
+        },
     }
 
     torch.save(
@@ -502,8 +643,8 @@ def main() -> None:
             "state_dict": model.state_dict(),
             "feature_columns": FEATURE_COLUMNS,
             "target_column": TARGET_COLUMN,
-            "hidden_dims": hidden_dims,
-            "activation": args.activation,
+            "hidden_dims": resume_meta["hidden_dims"],
+            "activation": resume_meta["activation"],
             "normalization": {
                 "x_mean": norm["x_mean"],
                 "x_std": norm["x_std"],
@@ -511,29 +652,28 @@ def main() -> None:
                 "y_std": norm["y_std"],
             },
         },
-        output_dir / "model_raw_steering.pt",
+        output_dir / "model_raw_steering_finetuned.pt",
     )
 
     export_model_to_json(
         model=model,
-        output_path=output_dir / "policy_export.json",
+        output_path=output_dir / "policy_export_finetuned.json",
         norm=norm,
-        hidden_dims=hidden_dims,
-        activation=args.activation,
-        filter_stats=filter_stats,
+        hidden_dims=resume_meta["hidden_dims"],
+        activation=resume_meta["activation"],
+        training_summary={"metrics": metrics, "dataset_summary": dataset_summary},
     )
 
+    df_all.to_csv(output_dir / "merged_training_dataset.csv", index=False)
     pd.DataFrame(history).to_csv(output_dir / "training_history.csv", index=False)
-    pd.DataFrame({
-        "y_true": test_y_raw.reshape(-1),
-        "y_pred": test_pred.reshape(-1),
-    }).to_csv(output_dir / "test_predictions.csv", index=False)
+    pd.DataFrame({"y_true": test_y_raw.reshape(-1), "y_pred": test_pred.reshape(-1)}).to_csv(
+        output_dir / "test_predictions.csv", index=False
+    )
 
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
-
-    with (output_dir / "filter_stats.json").open("w", encoding="utf-8") as f:
-        json.dump(filter_stats, f, indent=2)
+    with (output_dir / "dataset_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(dataset_summary, f, indent=2)
 
     if not args.no_plots:
         save_plots(output_dir, history, test_y_raw, test_pred)
@@ -547,10 +687,12 @@ def main() -> None:
             f"MaxAbsErr={split_metrics['max_abs_err']:.4f}"
         )
 
-    print(f"\nSaved outputs to: {output_dir}")
-    print("- model_raw_steering.pt")
-    print("- policy_export.json  (for C++ inference export)")
+    print("\nSaved outputs to:", output_dir)
+    print("- merged_training_dataset.csv")
+    print("- model_raw_steering_finetuned.pt")
+    print("- policy_export_finetuned.json")
     print("- metrics.json")
+    print("- dataset_summary.json")
     print("- training_history.csv")
     print("- test_predictions.csv")
     if not args.no_plots:
