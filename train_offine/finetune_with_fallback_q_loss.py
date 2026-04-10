@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
-"""Fine-tune an existing raw-steering policy using old MPC datasets and new DAgger rollout logs.
+"""Fine-tune a raw-steering policy from fallback / intervention datasets.
 
-This script is designed for the current project pipeline:
-- old training datasets use columns like `prev_steering`, `expert_steering`
-- new DAgger rollout logs use columns like `prev_steering_raw`, `raw_steering_expert`
-- the previous model can be loaded either from `model_raw_steering.pt` or from
-  `policy_export.json`
+This script is designed for the current RL-for-MPC workflow:
+- resume from an existing policy_export.json or .pt checkpoint
+- read one or more expert/base CSV files and one or more fallback/DAgger CSV files
+- optionally keep only intervention rows from the fallback logs
+- train with a hybrid objective:
+      L_total = alpha_bc * L_imitation
+              + lambda_delta_bc * L_delta_imitation
+              + beta_q * L_q_like_1step
 
-Main features:
-1. Load one or more old expert CSV datasets.
-2. Load one or more DAgger CSV logs and convert them to the training schema.
-3. Aggregate all data into a single dataframe.
-4. Fine-tune from an existing model with a small learning rate.
-5. Optionally upweight DAgger / fallback samples.
-6. Export an updated PyTorch checkpoint + JSON for C++ runtime.
+The Q-like loss is a differentiable 1-step surrogate derived from the same linearized /
+discretized bicycle model used by the C++ MPC controller. It is not the exact Q-loss from the
+paper, but it captures task-level penalties on next-step lateral error, next-step yaw error,
+steering magnitude, and steering smoothness.
 
-Example (PowerShell one line):
-    python finetune_with_dagger.py --base-csv dataset_1.csv dataset_2.csv dataset_3.csv dataset_4.csv \
-        --dagger-csv policy_dagger_log.csv --resume policy_export.json --output-dir finetune_run
+Expected CSV support:
+- base expert CSVs:
+    lateral_deviation, yaw_angle, curvature_0..3, velocity, prev_steering, expert_steering
+- fallback / DAgger CSVs (common variants supported automatically):
+    prev_steering_raw -> prev_steering
+    raw_steering_expert or raw_steering_mpc -> expert_steering
+    raw_steering_policy or raw_steering_pred -> policy_steering (optional, for diagnostics)
+    fallback_to_mpc / fallback / intervention / mpc_intervened -> fallback_to_mpc
+
+Example:
+    python finetune_with_fallback_q_loss.py \
+        --dagger-csv policy_fallback_log.csv \
+        --resume policy_export.json \
+        --output-dir finetune_fallback_q_run \
+        --use-weighted-sampler \
+        --train-scope fallback_only \
+        --alpha-bc 1.0 --lambda-delta-bc 0.2 --beta-q 1e-3
 """
 
 from __future__ import annotations
@@ -28,7 +42,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,6 +61,14 @@ FEATURE_COLUMNS: List[str] = [
     "prev_steering",
 ]
 TARGET_COLUMN = "expert_steering"
+
+OPTIONAL_POLICY_COLUMNS = [
+    "policy_steering",
+    "raw_abs_error",
+    "executed_steering",
+    "timestamp_ms",
+    "frame_id",
+]
 
 
 class MLPRegressor(nn.Module):
@@ -70,14 +92,15 @@ class MLPRegressor(nn.Module):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fine-tune a raw-steering policy with DAgger data")
-    parser.add_argument("--base-csv", nargs="*", default=[], help="Old expert CSV files from MPC-only collection")
-    parser.add_argument("--dagger-csv", nargs="*", default=[], help="New DAgger rollout CSV files")
+    parser = argparse.ArgumentParser(description="Fine-tune a raw-steering policy from fallback / DAgger data")
+    parser.add_argument("--base-csv", nargs="*", default=[], help="Optional expert/base CSV files")
+    parser.add_argument("--dagger-csv", nargs="*", default=[], help="Fallback / DAgger rollout CSV files")
     parser.add_argument("--resume", required=True, help="Path to old model checkpoint (.pt) or policy_export.json")
-    parser.add_argument("--output-dir", default="finetune_dagger_run", help="Directory to save outputs")
-    parser.add_argument("--epochs", type=int, default=80, help="Max fine-tuning epochs")
+    parser.add_argument("--output-dir", default="finetune_fallback_q_run", help="Directory to save outputs")
+
+    parser.add_argument("--epochs", type=int, default=100, help="Maximum fine-tuning epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for fine-tuning")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="AdamW weight decay")
     parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -86,18 +109,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-frac", type=float, default=0.1, help="Per-file validation fraction")
     parser.add_argument("--num-threads", type=int, default=1, help="Torch CPU threads")
 
+    parser.add_argument("--train-scope", choices=["fallback_only", "all"], default="fallback_only",
+                        help="For DAgger logs: keep only fallback/intervention rows, or all valid rows")
+    parser.add_argument("--use-weighted-sampler", action="store_true", help="Use weighted sampling instead of plain shuffle")
+    parser.add_argument("--dagger-weight", type=float, default=2.0, help="Sample weight for DAgger rows")
+    parser.add_argument("--fallback-weight", type=float, default=3.0, help="Extra sample weight when fallback_to_mpc=1")
+
+    parser.add_argument("--alpha-bc", type=float, default=1.0, help="Weight for imitation MSE loss")
+    parser.add_argument("--lambda-delta-bc", type=float, default=0.2, help="Weight for steering increment imitation loss")
+    parser.add_argument("--beta-q", type=float, default=1e-3, help="Weight for 1-step Q-like loss")
+    parser.add_argument("--disable-q", action="store_true", help="Disable Q-like loss and run imitation only")
+
     parser.add_argument("--max-abs-lateral", type=float, default=2.0)
     parser.add_argument("--max-abs-yaw", type=float, default=1.2)
     parser.add_argument("--max-abs-curvature", type=float, default=5.0)
     parser.add_argument("--max-abs-prev-steering", type=float, default=28.0)
     parser.add_argument("--max-abs-target", type=float, default=28.0)
 
-    parser.add_argument("--dagger-weight", type=float, default=2.0, help="Sample weight for DAgger rows")
-    parser.add_argument("--fallback-weight", type=float, default=3.0, help="Extra sample weight when fallback_to_mpc=1")
-    parser.add_argument("--use-weighted-sampler", action="store_true", help="Use weighted sampling instead of plain shuffle")
-    parser.add_argument("--only-fallback", action="store_true", help="Train only on DAgger rows with fallback_to_mpc=1")
-    parser.add_argument("--keep-policy-columns", action="store_true", help="Keep extra policy/debug columns in saved merged CSV")
-    parser.add_argument("--no-plots", action="store_true", help="Skip saving plots")
+    # MPC model parameters copied from current C++ controller defaults.
+    parser.add_argument("--ts", type=float, default=0.071)
+    parser.add_argument("--mass", type=float, default=2.3)
+    parser.add_argument("--lf", type=float, default=0.132)
+    parser.add_argument("--lr-veh", type=float, default=0.12)
+    parser.add_argument("--caf", type=float, default=0.04)
+    parser.add_argument("--car", type=float, default=0.02)
+    parser.add_argument("--iz", type=float, default=0.04)
+
+    parser.add_argument("--mpc-q1", type=float, default=1500.0, help="Weight on next-step lateral error")
+    parser.add_argument("--mpc-q2", type=float, default=120.0, help="Weight on next-step yaw error")
+    parser.add_argument("--mpc-r", type=float, default=5.0, help="Weight on steering magnitude")
+    parser.add_argument("--mpc-s", type=float, default=2.0, help="Weight on steering increment")
+
+    parser.add_argument("--keep-policy-columns", action="store_true", help="Keep debug/policy columns in merged CSV")
+    parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
     return parser.parse_args()
 
 
@@ -148,8 +192,7 @@ def _ensure_minimum_split_counts(n_rows: int, train_frac: float, val_frac: float
 
 def read_json_model(path: Path) -> Dict[str, object]:
     with path.open("r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    return cfg
+        return json.load(f)
 
 
 def model_from_json(json_cfg: Dict[str, object]) -> Tuple[MLPRegressor, Dict[str, np.ndarray], Dict[str, object]]:
@@ -180,7 +223,6 @@ def model_from_json(json_cfg: Dict[str, object]) -> Tuple[MLPRegressor, Dict[str
         "y_mean": np.asarray([norm_cfg["target_mean"]], dtype=np.float32),
         "y_std": np.asarray([norm_cfg["target_std"]], dtype=np.float32),
     }
-
     meta = {
         "hidden_dims": hidden_dims,
         "activation": activation,
@@ -197,8 +239,7 @@ def load_resume_model(resume_path: str) -> Tuple[MLPRegressor, Dict[str, np.ndar
         raise FileNotFoundError(f"Resume model not found: {path}")
 
     if path.suffix.lower() == ".json":
-        cfg = read_json_model(path)
-        return model_from_json(cfg)
+        return model_from_json(read_json_model(path))
 
     ckpt = torch.load(path, map_location="cpu")
     hidden_dims = [int(v) for v in ckpt["hidden_dims"]]
@@ -223,42 +264,71 @@ def load_resume_model(resume_path: str) -> Tuple[MLPRegressor, Dict[str, np.ndar
     return model, norm, meta
 
 
+def _coerce_binary(series: pd.Series) -> pd.Series:
+    vals = pd.to_numeric(series, errors="coerce").fillna(0.0).astype(float)
+    return (vals > 0.5).astype(np.int64)
+
+
+def _rename_first_existing(df: pd.DataFrame, targets: Dict[str, List[str]]) -> pd.DataFrame:
+    out = df.copy()
+    for dst, candidates in targets.items():
+        if dst in out.columns:
+            continue
+        for src in candidates:
+            if src in out.columns:
+                out = out.rename(columns={src: dst})
+                break
+    return out
+
+
 def sanitize_base_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     required = FEATURE_COLUMNS + [TARGET_COLUMN]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Base dataset {source_name} missing columns: {missing}")
+
     out = df.copy()
     out["dataset_role"] = "base"
     out["source_file"] = source_name
     if "fallback_to_mpc" not in out.columns:
         out["fallback_to_mpc"] = 0
+    else:
+        out["fallback_to_mpc"] = _coerce_binary(out["fallback_to_mpc"])
     return out
 
 
 def sanitize_dagger_df(df: pd.DataFrame, source_name: str, args: argparse.Namespace) -> pd.DataFrame:
-    rename_map = {
-        "prev_steering_raw": "prev_steering",
-        "raw_steering_expert": "expert_steering",
-    }
-    out = df.rename(columns=rename_map).copy()
+    out = _rename_first_existing(
+        df,
+        {
+            "prev_steering": ["prev_steering_raw", "prev_raw_steering"],
+            "expert_steering": ["raw_steering_expert", "raw_steering_mpc", "expert_raw_steering"],
+            "policy_steering": ["raw_steering_policy", "raw_steering_pred", "u_policy", "policy_raw_steering"],
+            "executed_steering": ["raw_steering_exec", "raw_steering_executed", "u_exec"],
+            "fallback_to_mpc": ["fallback", "intervention", "mpc_intervened", "is_fallback"],
+        },
+    )
 
     required = FEATURE_COLUMNS + [TARGET_COLUMN]
     missing = [c for c in required if c not in out.columns]
     if missing:
-        raise ValueError(f"DAgger dataset {source_name} missing columns after rename: {missing}")
+        raise ValueError(f"Fallback/DAgger dataset {source_name} missing columns after rename: {missing}")
 
     if "is_valid" in out.columns:
         out = out[out["is_valid"] == 1].copy()
-    if args.only_fallback:
+
+    if "fallback_to_mpc" in out.columns:
+        out["fallback_to_mpc"] = _coerce_binary(out["fallback_to_mpc"])
+    else:
+        out["fallback_to_mpc"] = 0
+
+    if args.train_scope == "fallback_only":
         if "fallback_to_mpc" not in out.columns:
-            raise ValueError("--only-fallback requested but fallback_to_mpc column is missing")
+            raise ValueError("--train-scope fallback_only requested but fallback_to_mpc column is missing")
         out = out[out["fallback_to_mpc"] == 1].copy()
 
     out["dataset_role"] = "dagger"
     out["source_file"] = source_name
-    if "fallback_to_mpc" not in out.columns:
-        out["fallback_to_mpc"] = 0
     return out
 
 
@@ -273,7 +343,7 @@ def load_and_merge_datasets(args: argparse.Namespace) -> Tuple[pd.DataFrame, Dic
         path = Path(csv_path)
         if not path.exists():
             raise FileNotFoundError(f"Base CSV not found: {path}")
-        df = pd.read_csv(path, on_bad_lines='skip', engine='python')
+        df = pd.read_csv(path, on_bad_lines="skip", engine="python")
         stats["base"][path.name] = {"rows_before": int(len(df))}
         df = sanitize_base_df(df, path.name)
         stats["base"][path.name]["rows_after_schema"] = int(len(df))
@@ -283,28 +353,37 @@ def load_and_merge_datasets(args: argparse.Namespace) -> Tuple[pd.DataFrame, Dic
         path = Path(csv_path)
         if not path.exists():
             raise FileNotFoundError(f"DAgger CSV not found: {path}")
-        df = pd.read_csv(path, on_bad_lines='skip', engine='python')
+        df = pd.read_csv(path, on_bad_lines="skip", engine="python")
         stats["dagger"][path.name] = {"rows_before": int(len(df))}
         df = sanitize_dagger_df(df, path.name, args)
         stats["dagger"][path.name]["rows_after_schema"] = int(len(df))
+        if "fallback_to_mpc" in df.columns:
+            stats["dagger"][path.name]["rows_fallback"] = int((df["fallback_to_mpc"] == 1).sum())
+            stats["dagger"][path.name]["rows_non_fallback"] = int((df["fallback_to_mpc"] == 0).sum())
         frames.append(df)
+
+    if not frames:
+        raise ValueError("No rows loaded from the provided CSV files")
 
     df_all = pd.concat(frames, ignore_index=True)
     df_all = df_all.replace([np.inf, -np.inf], np.nan)
     df_all = df_all.dropna(subset=FEATURE_COLUMNS + [TARGET_COLUMN])
 
     mask = np.ones(len(df_all), dtype=bool)
-    mask &= np.abs(df_all["lateral_deviation"].to_numpy()) <= args.max_abs_lateral
-    mask &= np.abs(df_all["yaw_angle"].to_numpy()) <= args.max_abs_yaw
+    mask &= np.abs(df_all["lateral_deviation"].to_numpy(dtype=np.float32)) <= args.max_abs_lateral
+    mask &= np.abs(df_all["yaw_angle"].to_numpy(dtype=np.float32)) <= args.max_abs_yaw
     for col in ["curvature_0", "curvature_1", "curvature_2", "curvature_3"]:
-        mask &= np.abs(df_all[col].to_numpy()) <= args.max_abs_curvature
-    mask &= np.abs(df_all["prev_steering"].to_numpy()) <= args.max_abs_prev_steering
-    mask &= np.abs(df_all[TARGET_COLUMN].to_numpy()) <= args.max_abs_target
-
+        mask &= np.abs(df_all[col].to_numpy(dtype=np.float32)) <= args.max_abs_curvature
+    mask &= np.abs(df_all["prev_steering"].to_numpy(dtype=np.float32)) <= args.max_abs_prev_steering
+    mask &= np.abs(df_all[TARGET_COLUMN].to_numpy(dtype=np.float32)) <= args.max_abs_target
     df_all = df_all.loc[mask].copy().reset_index(drop=True)
 
     if not args.keep_policy_columns:
-        keep_cols = list(dict.fromkeys(FEATURE_COLUMNS + [TARGET_COLUMN, "dataset_role", "source_file", "fallback_to_mpc", "timestamp_ms", "frame_id"]))
+        keep_cols = list(dict.fromkeys(
+            FEATURE_COLUMNS
+            + [TARGET_COLUMN, "dataset_role", "source_file", "fallback_to_mpc"]
+            + OPTIONAL_POLICY_COLUMNS
+        ))
         keep_cols = [c for c in keep_cols if c in df_all.columns]
         df_all = df_all[keep_cols].copy()
 
@@ -312,8 +391,11 @@ def load_and_merge_datasets(args: argparse.Namespace) -> Tuple[pd.DataFrame, Dic
         "n_rows_total": int(len(df_all)),
         "n_rows_base": int((df_all["dataset_role"] == "base").sum()) if "dataset_role" in df_all.columns else 0,
         "n_rows_dagger": int((df_all["dataset_role"] == "dagger").sum()) if "dataset_role" in df_all.columns else 0,
+        "n_rows_fallback": int((df_all["fallback_to_mpc"] == 1).sum()) if "fallback_to_mpc" in df_all.columns else 0,
+        "n_rows_non_fallback": int((df_all["fallback_to_mpc"] == 0).sum()) if "fallback_to_mpc" in df_all.columns else 0,
         "feature_columns": FEATURE_COLUMNS,
         "target_column": TARGET_COLUMN,
+        "train_scope": args.train_scope,
         "filters": {
             "max_abs_lateral": args.max_abs_lateral,
             "max_abs_yaw": args.max_abs_yaw,
@@ -349,15 +431,12 @@ def split_per_source(df: pd.DataFrame, train_frac: float, val_frac: float) -> Tu
 
 
 def dataframe_to_tensors(df: pd.DataFrame, norm: Dict[str, np.ndarray]) -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
-    x = df[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-    y = df[TARGET_COLUMN].to_numpy(dtype=np.float32).reshape(-1, 1)
+    x_raw = df[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+    y_raw = df[TARGET_COLUMN].to_numpy(dtype=np.float32).reshape(-1, 1)
 
-    x_norm = (x - norm["x_mean"]) / norm["x_std"]
-    y_norm = (y - norm["y_mean"]) / norm["y_std"]
-
-    x_tensor = torch.from_numpy(x_norm.astype(np.float32))
-    y_tensor = torch.from_numpy(y_norm.astype(np.float32))
-    return x_tensor, y_tensor, x, y
+    x_norm = (x_raw - norm["x_mean"]) / norm["x_std"]
+    y_norm = (y_raw - norm["y_mean"]) / norm["y_std"]
+    return torch.from_numpy(x_norm.astype(np.float32)), torch.from_numpy(y_norm.astype(np.float32)), x_raw, y_raw
 
 
 @torch.no_grad()
@@ -380,21 +459,147 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     return {"mae": mae, "rmse": rmse, "max_abs_err": max_abs_err, "r2": r2}
 
 
-def make_train_loader(train_df: pd.DataFrame, x_t: torch.Tensor, y_t: torch.Tensor, args: argparse.Namespace) -> DataLoader:
-    ds = TensorDataset(x_t, y_t)
+def make_train_loader(
+    train_df: pd.DataFrame,
+    x_norm_t: torch.Tensor,
+    y_norm_t: torch.Tensor,
+    x_raw: np.ndarray,
+    args: argparse.Namespace,
+) -> DataLoader:
+    x_raw_t = torch.from_numpy(x_raw.astype(np.float32))
+    ds = TensorDataset(x_norm_t, y_norm_t, x_raw_t)
 
     if not args.use_weighted_sampler:
         return DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
 
     weights = np.ones(len(train_df), dtype=np.float32)
     if "dataset_role" in train_df.columns:
-        weights = np.where(train_df["dataset_role"].to_numpy() == "dagger", args.dagger_weight, 1.0).astype(np.float32)
+        weights *= np.where(train_df["dataset_role"].to_numpy() == "dagger", args.dagger_weight, 1.0).astype(np.float32)
     if "fallback_to_mpc" in train_df.columns:
-        fb = train_df["fallback_to_mpc"].to_numpy().astype(np.float32)
+        fb = train_df["fallback_to_mpc"].to_numpy(dtype=np.float32)
         weights *= np.where(fb > 0.5, args.fallback_weight, 1.0).astype(np.float32)
 
-    sampler = WeightedRandomSampler(weights=torch.tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
+    sampler = WeightedRandomSampler(
+        weights=torch.tensor(weights, dtype=torch.double),
+        num_samples=len(weights),
+        replacement=True,
+    )
     return DataLoader(ds, batch_size=args.batch_size, sampler=sampler, drop_last=False)
+
+
+def build_discrete_matrices_torch(vx: torch.Tensor, args: argparse.Namespace) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = vx.device
+    dtype = vx.dtype
+    batch = vx.shape[0]
+    vx = torch.clamp(vx, min=1e-3)
+
+    m = float(args.mass)
+    lf = float(args.lf)
+    lr = float(args.lr_veh)
+    caf = float(args.caf)
+    car = float(args.car)
+    iz = float(args.iz)
+    ts = float(args.ts)
+
+    A_c = torch.zeros((batch, 4, 4), dtype=dtype, device=device)
+    B_c = torch.zeros((batch, 4, 2), dtype=dtype, device=device)
+
+    A_c[:, 0, 1] = 1.0
+    A_c[:, 1, 1] = -(2 * caf + 2 * car) / (m * vx)
+    A_c[:, 1, 2] = (2 * caf + 2 * car) / m
+    A_c[:, 1, 3] = (-2 * caf * lf + 2 * car * lr) / (m * vx)
+    A_c[:, 2, 3] = 1.0
+    A_c[:, 3, 1] = (-2 * caf * lf + 2 * car * lr) / (iz * vx)
+    A_c[:, 3, 2] = (2 * caf * lf - 2 * car * lr) / iz
+    A_c[:, 3, 3] = (-2 * caf * lf * lf - 2 * car * lr * lr) / (iz * vx)
+
+    B_c[:, 1, 0] = 2 * caf / m
+    B_c[:, 1, 1] = (-2 * caf * lf + 2 * car * lr) / (m * vx) - vx
+    B_c[:, 3, 0] = 2 * caf * lf / iz
+    B_c[:, 3, 1] = (-2 * caf * lf * lf - 2 * car * lr * lr) / (iz * vx)
+
+    M = torch.zeros((batch, 6, 6), dtype=dtype, device=device)
+    M[:, :4, :4] = A_c
+    M[:, :4, 4:] = B_c
+    M = M * ts
+
+    Md = torch.matrix_exp(M)
+    A_d = Md[:, :4, :4]
+    B_d = Md[:, :4, 4:]
+    B1_d = B_d[:, :, 0:1]
+    B2_d = B_d[:, :, 1:2]
+    return A_d, B1_d, B2_d
+
+
+def compute_loss_terms(
+    pred_norm: torch.Tensor,
+    target_norm: torch.Tensor,
+    x_raw: torch.Tensor,
+    norm: Dict[str, np.ndarray],
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    dtype = pred_norm.dtype
+    device = pred_norm.device
+
+    y_mean = torch.tensor(float(norm["y_mean"][0]), dtype=dtype, device=device)
+    y_std = torch.tensor(float(norm["y_std"][0]), dtype=dtype, device=device)
+
+    pred_deg = pred_norm.squeeze(1) * y_std + y_mean
+    tgt_deg = target_norm.squeeze(1) * y_std + y_mean
+    pred_rad = pred_deg * (math.pi / 180.0)
+    tgt_rad = tgt_deg * (math.pi / 180.0)
+
+    prev_deg = x_raw[:, 7]
+    prev_rad = prev_deg * (math.pi / 180.0)
+
+    loss_bc = torch.mean((pred_norm - target_norm) ** 2)
+    loss_delta_bc = torch.mean(((pred_rad - prev_rad) - (tgt_rad - prev_rad)) ** 2)
+
+    if args.disable_q or args.beta_q <= 0.0:
+        loss_q = torch.zeros((), dtype=dtype, device=device)
+        aux = {
+            "q_mean": torch.zeros((), dtype=dtype, device=device),
+            "ey1_sq_mean": torch.zeros((), dtype=dtype, device=device),
+            "epsi1_sq_mean": torch.zeros((), dtype=dtype, device=device),
+            "u_sq_mean": torch.zeros((), dtype=dtype, device=device),
+            "du_sq_mean": torch.zeros((), dtype=dtype, device=device),
+        }
+        return loss_bc, {"loss_delta_bc": loss_delta_bc, "loss_q": loss_q, **aux}
+
+    ey = x_raw[:, 0]
+    epsi = x_raw[:, 1]
+    curv0 = x_raw[:, 2]
+    vx = x_raw[:, 6]
+
+    x0 = torch.stack([ey, torch.zeros_like(ey), epsi, torch.zeros_like(ey)], dim=1)
+    A_d, B1_d, B2_d = build_discrete_matrices_torch(vx, args)
+    v0 = curv0 * vx
+
+    x1 = torch.bmm(A_d, x0.unsqueeze(-1))
+    x1 = x1 + B1_d * pred_rad.view(-1, 1, 1) + B2_d * v0.view(-1, 1, 1)
+    x1 = x1.squeeze(-1)
+
+    ey1 = x1[:, 0]
+    epsi1 = x1[:, 2]
+    du = pred_rad - prev_rad
+
+    q_sample = (
+        float(args.mpc_q1) * ey1.pow(2)
+        + float(args.mpc_q2) * epsi1.pow(2)
+        + float(args.mpc_r) * pred_rad.pow(2)
+        + float(args.mpc_s) * du.pow(2)
+    )
+    loss_q = q_sample.mean()
+    aux = {
+        "loss_delta_bc": loss_delta_bc,
+        "loss_q": loss_q,
+        "q_mean": q_sample.mean(),
+        "ey1_sq_mean": ey1.pow(2).mean(),
+        "epsi1_sq_mean": epsi1.pow(2).mean(),
+        "u_sq_mean": pred_rad.pow(2).mean(),
+        "du_sq_mean": du.pow(2).mean(),
+    }
+    return loss_bc, aux
 
 
 def train_model(
@@ -408,9 +613,9 @@ def train_model(
     lr: float,
     weight_decay: float,
     patience: int,
+    args: argparse.Namespace,
 ) -> Tuple[nn.Module, List[Dict[str, float]]]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = nn.MSELoss()
 
     history: List[Dict[str, float]] = []
     best_state = copy.deepcopy(model.state_dict())
@@ -419,25 +624,40 @@ def train_model(
 
     for epoch in range(1, epochs + 1):
         model.train()
-        epoch_losses: List[float] = []
+        total_losses: List[float] = []
+        bc_losses: List[float] = []
+        delta_losses: List[float] = []
+        q_losses: List[float] = []
 
-        for xb, yb in train_loader:
+        for xb, yb, xrawb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
+            xrawb = xrawb.to(device)
+
             optimizer.zero_grad(set_to_none=True)
             preds = model(xb)
-            loss = criterion(preds, yb)
+
+            loss_bc, aux = compute_loss_terms(preds, yb, xrawb, norm, args)
+            loss_delta = aux["loss_delta_bc"]
+            loss_q = aux["loss_q"]
+            loss = float(args.alpha_bc) * loss_bc + float(args.lambda_delta_bc) * loss_delta + float(args.beta_q) * loss_q
             loss.backward()
             optimizer.step()
-            epoch_losses.append(float(loss.item()))
 
-        train_loss = float(np.mean(epoch_losses)) if epoch_losses else float("nan")
+            total_losses.append(float(loss.item()))
+            bc_losses.append(float(loss_bc.item()))
+            delta_losses.append(float(loss_delta.item()))
+            q_losses.append(float(loss_q.item()))
+
         val_pred = predict_raw(model, val_x, norm, device)
         val_metrics = regression_metrics(val_y_raw.reshape(-1), val_pred)
 
         row = {
             "epoch": epoch,
-            "train_loss_norm_mse": train_loss,
+            "train_total_loss": float(np.mean(total_losses)) if total_losses else float("nan"),
+            "train_bc_loss_norm_mse": float(np.mean(bc_losses)) if bc_losses else float("nan"),
+            "train_delta_loss": float(np.mean(delta_losses)) if delta_losses else float("nan"),
+            "train_q_loss": float(np.mean(q_losses)) if q_losses else float("nan"),
             "val_rmse_raw": val_metrics["rmse"],
             "val_mae_raw": val_metrics["mae"],
             "val_r2": val_metrics["r2"],
@@ -453,9 +673,13 @@ def train_model(
 
         if epoch == 1 or epoch % 10 == 0:
             print(
-                f"Epoch {epoch:4d} | train MSE(norm)={train_loss:.6f} | "
-                f"val RMSE(raw)={val_metrics['rmse']:.4f} | "
-                f"val MAE(raw)={val_metrics['mae']:.4f} | val R2={val_metrics['r2']:.4f}"
+                f"Epoch {epoch:4d} | "
+                f"train_total={row['train_total_loss']:.6f} | "
+                f"train_bc={row['train_bc_loss_norm_mse']:.6f} | "
+                f"train_delta={row['train_delta_loss']:.6f} | "
+                f"train_q={row['train_q_loss']:.6f} | "
+                f"val RMSE(raw)={row['val_rmse_raw']:.4f} | "
+                f"val MAE(raw)={row['val_mae_raw']:.4f} | val R2={row['val_r2']:.4f}"
             )
 
         if no_improve >= patience:
@@ -507,11 +731,13 @@ def save_plots(output_dir: Path, history: List[Dict[str, float]], y_true: np.nda
     hist_df = pd.DataFrame(history)
 
     plt.figure(figsize=(8, 5))
-    plt.plot(hist_df["epoch"], hist_df["train_loss_norm_mse"], label="train loss (norm MSE)")
-    plt.plot(hist_df["epoch"], hist_df["val_rmse_raw"], label="val RMSE (raw steering)")
+    plt.plot(hist_df["epoch"], hist_df["train_total_loss"], label="train total")
+    plt.plot(hist_df["epoch"], hist_df["train_bc_loss_norm_mse"], label="train bc")
+    plt.plot(hist_df["epoch"], hist_df["train_q_loss"], label="train q")
+    plt.plot(hist_df["epoch"], hist_df["val_rmse_raw"], label="val RMSE raw")
     plt.xlabel("Epoch")
     plt.ylabel("Loss / RMSE")
-    plt.title("Fine-tuning history")
+    plt.title("Fallback fine-tuning history")
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_dir / "training_history.png", dpi=150)
@@ -571,7 +797,6 @@ def main() -> None:
 
     train_df, val_df, test_df = split_per_source(df_all, args.train_frac, args.val_frac)
 
-    # Recompute normalization from aggregated TRAIN split.
     x_train = train_df[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
     y_train = train_df[TARGET_COLUMN].to_numpy(dtype=np.float32).reshape(-1, 1)
     norm = {
@@ -581,11 +806,11 @@ def main() -> None:
         "y_std": np.where(y_train.std(axis=0) < 1e-8, 1.0, y_train.std(axis=0)),
     }
 
-    train_x_t, train_y_t, _, train_y_raw = dataframe_to_tensors(train_df, norm)
-    val_x_t, val_y_t, _, val_y_raw = dataframe_to_tensors(val_df, norm)
-    test_x_t, test_y_t, _, test_y_raw = dataframe_to_tensors(test_df, norm)
+    train_x_t, train_y_t, train_x_raw, train_y_raw = dataframe_to_tensors(train_df, norm)
+    val_x_t, val_y_t, val_x_raw, val_y_raw = dataframe_to_tensors(val_df, norm)
+    test_x_t, test_y_t, test_x_raw, test_y_raw = dataframe_to_tensors(test_df, norm)
 
-    train_loader = make_train_loader(train_df, train_x_t, train_y_t, args)
+    train_loader = make_train_loader(train_df, train_x_t, train_y_t, train_x_raw, args)
     model = model.to(device)
 
     model, history = train_model(
@@ -599,6 +824,7 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
         patience=args.patience,
+        args=args,
     )
 
     train_pred = predict_raw(model, train_x_t, norm, device)
@@ -614,6 +840,9 @@ def main() -> None:
             "train": int(len(train_df)),
             "val": int(len(val_df)),
             "test": int(len(test_df)),
+            "train_fallback": int((train_df["fallback_to_mpc"] == 1).sum()) if "fallback_to_mpc" in train_df.columns else 0,
+            "val_fallback": int((val_df["fallback_to_mpc"] == 1).sum()) if "fallback_to_mpc" in val_df.columns else 0,
+            "test_fallback": int((test_df["fallback_to_mpc"] == 1).sum()) if "fallback_to_mpc" in test_df.columns else 0,
         },
         "resume_model": args.resume,
         "resume_format": resume_meta["source_format"],
@@ -625,10 +854,25 @@ def main() -> None:
             "epochs": args.epochs,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
+            "train_scope": args.train_scope,
             "dagger_weight": args.dagger_weight,
             "fallback_weight": args.fallback_weight,
             "use_weighted_sampler": bool(args.use_weighted_sampler),
-            "only_fallback": bool(args.only_fallback),
+            "alpha_bc": args.alpha_bc,
+            "lambda_delta_bc": args.lambda_delta_bc,
+            "beta_q": args.beta_q,
+            "disable_q": bool(args.disable_q),
+            "mpc_q1": args.mpc_q1,
+            "mpc_q2": args.mpc_q2,
+            "mpc_r": args.mpc_r,
+            "mpc_s": args.mpc_s,
+            "ts": args.ts,
+            "mass": args.mass,
+            "lf": args.lf,
+            "lr_veh": args.lr_veh,
+            "caf": args.caf,
+            "car": args.car,
+            "iz": args.iz,
         },
         "old_normalization": {
             "x_mean": old_norm["x_mean"].astype(float).tolist(),

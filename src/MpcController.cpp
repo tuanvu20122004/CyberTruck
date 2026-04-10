@@ -3,10 +3,11 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
-const float DISTANCE_TO_AXLE = 0.15f;  // 15cm from camera to axle
-const float DEFAULT_BIRD_EYE_WIDTH = 640.0f;   // Default bird's eye view width
-const float DEFAULT_BIRD_EYE_HEIGHT = 480.0f;  // Default bird's eye view height
+const float DISTANCE_TO_AXLE = 0.15f;
+const float DEFAULT_BIRD_EYE_WIDTH = 640.0f;
+const float DEFAULT_BIRD_EYE_HEIGHT = 480.0f;
 
 static int prev_z_dim = -1;
 static int prev_constraint_dim = -1;
@@ -16,29 +17,29 @@ float vehicle_y_;
 
 MpcController::MpcController()
     : wheelbase_(0.2515f),
-    mass_(2.3f),
-    Lf_(0.132f),
-    Lr_(0.12f),
-    Caf_(0.04f),
-    Car_(0.02f),
-    Iz_(0.04f),
-    N_(10),
-    Q1_(1500.0f),
-    Q2_(120.0f),
-    R_(5.0f),
-    Ts_(0.071f),                        //14Hz trong mô hinh noi tai
-    initialized_(false),
-    solver_(nullptr),
-    umin_(-28.0 * M_PI / 180.0),
-    umax_(28.0 * M_PI / 180.0),
-    solver_initialized_(false),
-    pixel_per_meter_(0.001f),
-    vehicle_x_(0.0f),
-    vehicle_y_(0.0f) {
+      mass_(2.3f),
+      Lf_(0.132f),
+      Lr_(0.12f),
+      Caf_(0.04f),
+      Car_(0.02f),
+      Iz_(0.04f),
+      N_(10),
+      Q1_(1500.0f),
+      Q2_(120.0f),
+      R_(5.0f),
+      Ts_(0.071f),
+      initialized_(false),
+      solver_(nullptr),
+      umin_(-28.0 * M_PI / 180.0),
+      umax_(28.0 * M_PI / 180.0),
+      solver_initialized_(false),
+      pixel_per_meter_(0.001f),
+      vehicle_x_(0.0f),
+      vehicle_y_(0.0f) {
 }
 
 void MpcController::setVehicleParams(float wheelbase, float mass, float Lf, float Lr,
-    float Caf, float Car, float Iz) {
+                                     float Caf, float Car, float Iz) {
     wheelbase_ = wheelbase;
     mass_ = mass;
     Lf_ = Lf;
@@ -51,6 +52,11 @@ void MpcController::setVehicleParams(float wheelbase, float mass, float Lf, floa
 void MpcController::setPredictionHorizon(int N) {
     N_ = N;
     initialized_ = false;
+}
+
+void MpcController::setVehiclePosition(float x, float y) {
+    vehicle_x_ = x;
+    vehicle_y_ = y;
 }
 
 Eigen::MatrixXd MpcController::matrixPower(const Eigen::MatrixXd& A, int p) {
@@ -68,7 +74,7 @@ void MpcController::init(float Q1_weight, float Q2_weight, float R_weight) {
     Q2_ = Q2_weight;
     R_ = R_weight;
 
-    buildMpcMatrices(0.04f);
+    buildMpcMatrices(0.08f);
 
     if (!solver_) solver_ = std::make_unique<OsqpEigen::Solver>();
     solver_->settings()->setVerbosity(false);
@@ -82,7 +88,6 @@ void MpcController::init(float Q1_weight, float Q2_weight, float R_weight) {
 }
 
 void MpcController::buildMpcMatrices(float Vx) {
-    // Continuous state-space
     Eigen::MatrixXd A_c(4, 4);
     A_c << 0, 1, 0, 0,
            0, -(2*Caf_ + 2*Car_)/(mass_*Vx), (2*Caf_ + 2*Car_)/mass_,
@@ -98,7 +103,6 @@ void MpcController::buildMpcMatrices(float Vx) {
            0, 0,
            2*Caf_*Lf_/Iz_, (-2*Caf_*Lf_*Lf_ - 2*Car_*Lr_*Lr_)/(Iz_*Vx);
 
-    // Discretization
     Eigen::MatrixXd M(6, 6);
     M.setZero();
     M.block(0, 0, 4, 4) = A_c;
@@ -111,22 +115,22 @@ void MpcController::buildMpcMatrices(float Vx) {
     B1_d_ = B_d.col(0);
     B2_d_ = B_d.col(1);
 
-    int n = 4;  // State dimension
-    int m = 1;  // Control input dimension
+    const int n = 4;
+    const int m = 1;
 
-    AX_ = Eigen::MatrixXd::Zero((N_ + 1) * n, n);    // G
+    AX_ = Eigen::MatrixXd::Zero((N_ + 1) * n, n);
     for (int i = 0; i <= N_; ++i) {
         AX_.block(i * n, 0, n, n) = matrixPower(A_d_, i);
     }
 
-    BU_ = Eigen::MatrixXd::Zero((N_ + 1) * n, N_ * m);  // H
+    BU_ = Eigen::MatrixXd::Zero((N_ + 1) * n, N_ * m);
     for (int i = 1; i <= N_; ++i) {
         for (int j = 0; j < i; ++j) {
             BU_.block(i * n, j * m, n, m) = matrixPower(A_d_, i - j - 1) * B1_d_;
         }
     }
 
-    BV_ = Eigen::MatrixXd::Zero((N_ + 1) * n, N_ * m);   // E
+    BV_ = Eigen::MatrixXd::Zero((N_ + 1) * n, N_ * m);
     for (int i = 1; i <= N_; ++i) {
         for (int j = 0; j < i; ++j) {
             BV_.block(i * n, j * m, n, m) = matrixPower(A_d_, i - j - 1) * B2_d_;
@@ -140,13 +144,15 @@ void MpcController::buildMpcMatrices(float Vx) {
     Eigen::MatrixXd R = Eigen::MatrixXd::Identity(1, 1) * R_;
 
     Eigen::MatrixXd QX = Eigen::MatrixXd::Zero((N_ + 1) * n, (N_ + 1) * n);
-    for (int i = 0; i < N_; ++i)
+    for (int i = 0; i < N_; ++i) {
         QX.block(i * n, i * n, n, n) = Q;
+    }
     QX.block(N_ * n, N_ * n, n, n) = QN;
 
     Eigen::MatrixXd RU = Eigen::MatrixXd::Zero(N_ * m, N_ * m);
-    for (int i = 0; i < N_; ++i)
+    for (int i = 0; i < N_; ++i) {
         RU.block(i * m, i * m, m, m) = R;
+    }
 
     H_ = Eigen::MatrixXd::Zero((N_ + 1) * n + N_ * m, (N_ + 1) * n + N_ * m);
     H_.block(0, 0, (N_ + 1) * n, (N_ + 1) * n) = QX;
@@ -167,10 +173,10 @@ void MpcController::debugMatrices() {
 }
 
 float MpcController::solveQP(const Eigen::VectorXd& x0, const Eigen::VectorXd& v_k) {
-    int nx = 4;
-    int nu = 1;
-    int z_dim = (N_ + 1) * nx + N_ * nu;
-    int constraint_dim = (N_ + 1) * nx;
+    const int nx = 4;
+    const int nu = 1;
+    const int z_dim = (N_ + 1) * nx + N_ * nu;
+    const int constraint_dim = (N_ + 1) * nx;
 
     if (x0.size() != nx || v_k.size() != N_) {
         std::cerr << "[MPC] Invalid input sizes!" << std::endl;
@@ -181,7 +187,7 @@ float MpcController::solveQP(const Eigen::VectorXd& x0, const Eigen::VectorXd& v
     Eigen::VectorXd g = Eigen::VectorXd::Zero(z_dim);
 
     Eigen::MatrixXd Aeq = Eigen::MatrixXd::Zero((N_ + 1) * nx, z_dim);
-    Aeq.block(0, 0, (N_ + 1) * nx, (N_ + 1) * nx) = 
+    Aeq.block(0, 0, (N_ + 1) * nx, (N_ + 1) * nx) =
         Eigen::MatrixXd::Identity((N_ + 1) * nx, (N_ + 1) * nx);
     Aeq.block(0, (N_ + 1) * nx, (N_ + 1) * nx, N_ * nu) = -BU_;
     Eigen::VectorXd beq = AX_ * x0 + BV_ * v_k;
@@ -197,7 +203,6 @@ float MpcController::solveQP(const Eigen::VectorXd& x0, const Eigen::VectorXd& v
     Eigen::VectorXd lb = beq;
     Eigen::VectorXd ub = beq;
 
-    // If solver not initialized or dimensions changed, reinitialize
     if (!solver_initialized_ || prev_z_dim != z_dim || prev_constraint_dim != constraint_dim) {
         solver_.reset(new OsqpEigen::Solver());
         solver_->settings()->setVerbosity(false);
@@ -227,7 +232,6 @@ float MpcController::solveQP(const Eigen::VectorXd& x0, const Eigen::VectorXd& v
         prev_z_dim = z_dim;
         prev_constraint_dim = constraint_dim;
     } else {
-        // Fast update for next iteration
         if (!solver_->updateHessianMatrix(G_sparse) ||
             !solver_->updateGradient(g) ||
             !solver_->updateBounds(lb, ub)) {
@@ -249,9 +253,92 @@ float MpcController::solveQP(const Eigen::VectorXd& x0, const Eigen::VectorXd& v
 
     double u_cmd = z_opt((N_ + 1) * nx);
     u_cmd = std::clamp(u_cmd, static_cast<double>(umin_), static_cast<double>(umax_));
-
-    //return static_cast<float>(-u_cmd * 180.0 / M_PI);
     return static_cast<float>(u_cmd * 180.0 / M_PI);
+}
+
+double MpcController::solveQPExactQ(const Eigen::VectorXd& x0,
+                                    const Eigen::VectorXd& v_k,
+                                    double u0_fixed_rad) {
+    const int nx = 4;
+    const int nu = 1;
+    const int z_dim = (N_ + 1) * nx + N_ * nu;
+    const int dyn_constraint_dim = (N_ + 1) * nx;
+    const int total_constraint_dim = dyn_constraint_dim + 1;
+
+    if (x0.size() != nx || v_k.size() != N_) {
+        std::cerr << "[MPC][ExactQ] Invalid input sizes!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    u0_fixed_rad = std::clamp(u0_fixed_rad, umin_, umax_);
+
+    Eigen::MatrixXd G = H_;
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(z_dim);
+
+    Eigen::MatrixXd Aeq = Eigen::MatrixXd::Zero(dyn_constraint_dim, z_dim);
+    Aeq.block(0, 0, dyn_constraint_dim, dyn_constraint_dim) =
+        Eigen::MatrixXd::Identity(dyn_constraint_dim, dyn_constraint_dim);
+    Aeq.block(0, dyn_constraint_dim, dyn_constraint_dim, N_ * nu) = -BU_;
+    Eigen::VectorXd beq = AX_ * x0 + BV_ * v_k;
+
+    if (!G.allFinite() || !Aeq.allFinite() || !beq.allFinite()) {
+        std::cerr << "[MPC][ExactQ] Matrix contains NaN/Inf!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    Eigen::MatrixXd Aall = Eigen::MatrixXd::Zero(total_constraint_dim, z_dim);
+    Aall.block(0, 0, dyn_constraint_dim, z_dim) = Aeq;
+    const int u0_index = dyn_constraint_dim;
+    Aall(dyn_constraint_dim, u0_index) = 1.0;
+
+    Eigen::VectorXd lb(total_constraint_dim);
+    Eigen::VectorXd ub(total_constraint_dim);
+    lb.head(dyn_constraint_dim) = beq;
+    ub.head(dyn_constraint_dim) = beq;
+    lb(dyn_constraint_dim) = u0_fixed_rad;
+    ub(dyn_constraint_dim) = u0_fixed_rad;
+
+    Eigen::SparseMatrix<double> G_sparse = G.sparseView();
+    Eigen::SparseMatrix<double> A_sparse = Aall.sparseView();
+
+    OsqpEigen::Solver exact_solver;
+    exact_solver.settings()->setVerbosity(false);
+    exact_solver.settings()->setWarmStart(false);
+    exact_solver.settings()->setMaxIteration(4000);
+    exact_solver.settings()->setAbsoluteTolerance(1e-5);
+    exact_solver.settings()->setRelativeTolerance(1e-5);
+
+    exact_solver.data()->setNumberOfVariables(z_dim);
+    exact_solver.data()->setNumberOfConstraints(total_constraint_dim);
+
+    if (!exact_solver.data()->setHessianMatrix(G_sparse) ||
+        !exact_solver.data()->setGradient(g) ||
+        !exact_solver.data()->setLinearConstraintsMatrix(A_sparse) ||
+        !exact_solver.data()->setLowerBound(lb) ||
+        !exact_solver.data()->setUpperBound(ub)) {
+        std::cerr << "[MPC][ExactQ] Failed to set solver data!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    if (!exact_solver.initSolver()) {
+        std::cerr << "[MPC][ExactQ] Failed to init solver!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    if (exact_solver.solveProblem() != OsqpEigen::ErrorExitFlag::NoError) {
+        std::cerr << "[MPC][ExactQ] Solve failed!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    Eigen::VectorXd z_opt = exact_solver.getSolution();
+    if (z_opt.size() != z_dim || !z_opt.allFinite()) {
+        std::cerr << "[MPC][ExactQ] Invalid solution!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const Eigen::VectorXd Hz = G * z_opt;
+    const double objective = 0.5 * z_opt.dot(Hz) + g.dot(z_opt);
+    return objective;
 }
 
 float MpcController::computeSteeringAngle(const MpcState& state, float velocity) {
@@ -291,130 +378,145 @@ float MpcController::computeSteeringAngle(const MpcState& state, float velocity)
     return solveQP(x0, v_k);
 }
 
-// ==================== MPC COMPUTATION METHODS ====================
+double MpcController::evaluateExactQ(const MpcState& state, float velocity, double u0_fixed_deg) {
+    if (!initialized_) {
+        std::cerr << "[MPC][ExactQ] Not initialized!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    static float cached_velocity = -1.0f;
+    if (std::abs(velocity - cached_velocity) > 0.01f) {
+        buildMpcMatrices(velocity);
+        cached_velocity = velocity;
+        prev_z_dim = -1;
+        prev_constraint_dim = -1;
+    }
+
+    if (!state.is_valid) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    if (state.curvature.size() < static_cast<size_t>(N_)) {
+        std::cerr << "[MPC][ExactQ] Curvature vector too small!" << std::endl;
+        return std::numeric_limits<double>::infinity();
+    }
+
+    Eigen::VectorXd x0(4);
+    x0(0) = state.lateral_deviation;
+    x0(1) = 0.0;
+    x0(2) = state.yaw_angle;
+    x0(3) = 0.0;
+
+    Eigen::VectorXd v_k(N_);
+    for (int i = 0; i < N_; ++i) {
+        v_k(i) = state.curvature[i] * velocity;
+    }
+
+    const double u0_fixed_rad = u0_fixed_deg * M_PI / 180.0;
+    return solveQPExactQ(x0, v_k, u0_fixed_rad);
+}
 
 cv::Vec3f MpcController::fitCenterlinePoly(const std::vector<cv::Point>& centerline) {
     if (centerline.size() < 3) {
         return cv::Vec3f(0, 0, 0);
     }
-    
+
     std::vector<float> x_vals, y_vals;
     for (const auto& pt : centerline) {
         x_vals.push_back(static_cast<float>(pt.x));
         y_vals.push_back(static_cast<float>(pt.y));
     }
-    
+
     cv::Mat Y(y_vals.size(), 1, CV_32F, y_vals.data());
     cv::Mat X(x_vals.size(), 1, CV_32F, x_vals.data());
-    
+
     cv::Mat A(Y.rows, 3, CV_32F);
     for (int i = 0; i < Y.rows; ++i) {
-        float y = Y.at<float>(i, 0);
+        const float y = Y.at<float>(i, 0);
         A.at<float>(i, 0) = y * y;
         A.at<float>(i, 1) = y;
         A.at<float>(i, 2) = 1.0f;
     }
-    
+
     cv::Mat coeffs;
-    bool ok = cv::solve(A, X, coeffs, cv::DECOMP_SVD);
-    
+    const bool ok = cv::solve(A, X, coeffs, cv::DECOMP_SVD);
+
     if (ok) {
-        return cv::Vec3f(coeffs.at<float>(0), 
-                        coeffs.at<float>(1), 
-                        coeffs.at<float>(2));
+        return cv::Vec3f(coeffs.at<float>(0), coeffs.at<float>(1), coeffs.at<float>(2));
     }
-    
     return cv::Vec3f(0, 0, 0);
 }
 
 std::vector<float> MpcController::computeMultipleCurvatures(const cv::Vec3f& coeffs, int N) {
     std::vector<float> curvatures;
-    float a = coeffs[0];
-    float b = coeffs[1];
+    const float a = coeffs[0];
+    const float b = coeffs[1];
 
-    if(vehicle_y_ == 0.0f){
+    if (vehicle_y_ == 0.0f) {
         vehicle_y_ = DEFAULT_BIRD_EYE_HEIGHT - 1.0f;
     }
-    
+
     for (int i = 0; i < N; ++i) {
-        float y = vehicle_y_ - i * 26.0f;  // 26 pixels ≈ 3cm
-        
-        float dx_dy = 2.0f * a * y + b;
-        float d2x_dy2 = 2.0f * a;
-        
-        float numerator = std::abs(d2x_dy2);
-        float denominator = std::pow(1.0f + dx_dy * dx_dy, 1.5f);
-        
-        float kappa_pixel = (denominator > 1e-6f) ? (numerator / denominator) : 0.0f;
-        float kappa_meter = kappa_pixel / pixel_per_meter_;
-        // càn giơi hạn lại độ cong tối đa
+        const float y = vehicle_y_ - i * 26.0f;
+        const float dx_dy = 2.0f * a * y + b;
+        const float d2x_dy2 = 2.0f * a;
+        const float numerator = std::abs(d2x_dy2);
+        const float denominator = std::pow(1.0f + dx_dy * dx_dy, 1.5f);
+        const float kappa_pixel = (denominator > 1e-6f) ? (numerator / denominator) : 0.0f;
+        const float kappa_meter = kappa_pixel / pixel_per_meter_;
         curvatures.push_back(kappa_meter);
     }
     return curvatures;
 }
 
-float MpcController::computeLateralDeviation(const cv::Vec3f& coeffs, 
-                                          const cv::Mat& birdEyeView) {
-
+float MpcController::computeLateralDeviation(const cv::Vec3f& coeffs, const cv::Mat& birdEyeView) {
     if (vehicle_x_ == 0.0f && vehicle_y_ == 0.0f) {
         vehicle_x_ = birdEyeView.cols / 2.0f;
         vehicle_y_ = birdEyeView.rows - 1.0f;
     }
-    
-    float centerline_x = coeffs[0] * vehicle_y_ * vehicle_y_ + 
-                         coeffs[1] * vehicle_y_ + 
-                         coeffs[2];
-    
-    float lateral_deviation_pixel = vehicle_x_ - centerline_x;
-    float lateral_deviation_meter = lateral_deviation_pixel * pixel_per_meter_;
-    
+
+    const float centerline_x = coeffs[0] * vehicle_y_ * vehicle_y_ + coeffs[1] * vehicle_y_ + coeffs[2];
+    const float lateral_deviation_pixel = vehicle_x_ - centerline_x;
+    const float lateral_deviation_meter = lateral_deviation_pixel * pixel_per_meter_;
     return lateral_deviation_meter;
 }
 
 float MpcController::computeYawAngle(const cv::Vec3f& coeffs, float y) {
-    float dx_dy = 2.0f * coeffs[0] * y + coeffs[1];
-    float yaw_angle_rad = std::atan(dx_dy);
-    
+    const float dx_dy = 2.0f * coeffs[0] * y + coeffs[1];
+    const float yaw_angle_rad = std::atan(dx_dy);
     return yaw_angle_rad;
 }
 
 MpcState MpcController::computeMpcParameters(const std::vector<cv::Point>& centerline,
-                                          const cv::Mat& birdEyeView) {
+                                             const cv::Mat& birdEyeView) {
     MpcState result;
-    
+
     if (centerline.size() < 3) {
         result.is_valid = false;
         return result;
     }
-    
-    cv::Vec3f coeffs = fitCenterlinePoly(centerline);
-    
+
+    const cv::Vec3f coeffs = fitCenterlinePoly(centerline);
+
     if (vehicle_x_ == 0.0f && vehicle_y_ == 0.0f) {
         vehicle_x_ = birdEyeView.cols / 2.0f;
         vehicle_y_ = birdEyeView.rows - 1.0f;
     }
-    
-    // 1. Compute curvature vector (10 elements)
+
     result.curvature = computeMultipleCurvatures(coeffs, 10);
-    
-    // 2. Compute yaw angle
     result.yaw_angle = computeYawAngle(coeffs, vehicle_y_);
-    
-    // 3. Compute lateral deviation (with steering angle compensation)
-    float raw_deviation = computeLateralDeviation(coeffs, birdEyeView);
-    result.lateral_deviation = raw_deviation - 
-                               DISTANCE_TO_AXLE * std::sin(result.yaw_angle);
-    
+
+    const float raw_deviation = computeLateralDeviation(coeffs, birdEyeView);
+    result.lateral_deviation = raw_deviation - DISTANCE_TO_AXLE * std::sin(result.yaw_angle);
     result.is_valid = true;
     return result;
 }
 
-void MpcController::setWeights(float q1, float q2, float r)
-{
+void MpcController::setWeights(float q1, float q2, float r) {
     Q1_ = q1;
     Q2_ = q2;
-    R_  = r;
-    buildMpcMatrices(0.08f);   // hoặc dùng velocity hiện tại nếu bạn muốn
+    R_ = r;
+    buildMpcMatrices(0.08f);
     prev_z_dim = -1;
     prev_constraint_dim = -1;
 }
