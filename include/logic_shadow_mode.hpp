@@ -12,6 +12,7 @@
 #include <atomic>
 #include <fstream>
 #include <mutex>
+#include <atomic>
 #include <string>
 
 class Logic {
@@ -55,6 +56,7 @@ private:
     const int command_period_ms_ = 50;
     const bool hold_last_on_invalid_state_ = true;
 
+    std::atomic<bool> drive_enabled{false};
     std::atomic<bool> running{true};
     std::mutex        frame_mutex;
     cv::Mat           latest_frame;

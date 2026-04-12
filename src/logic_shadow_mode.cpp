@@ -112,7 +112,7 @@ void Logic::logShadowRow(long long timestamp_ms,
                << (state.curvature.size() > 1 ? state.curvature[1] : 0.0f) << ','
                << (state.curvature.size() > 2 ? state.curvature[2] : 0.0f) << ','
                << (state.curvature.size() > 3 ? state.curvature[3] : 0.0f) << ','
-               << desired_velocity << ','
+               << (drive_enabled.load() ? desired_velocity : 0.0f) << ','
                << prev_raw_steering << ','
                << raw_steering_policy << ','
                << raw_steering_expert << ','
@@ -143,7 +143,16 @@ void Logic::cameraLoop()
         }
 
         const int key = cv::waitKey(1);
-        if (key == 27 || key == 'q' || key == 'Q') {
+
+        if (key == 'r' || key == 'R') {
+            drive_enabled.store(true);
+            std::cout << "[LOGIC] DRIVE ENABLED: vehicle can move\n";
+        }
+        else if (key == 's' || key == 'S') {
+            drive_enabled.store(false);
+            std::cout << "[LOGIC] DRIVE DISABLED: send speed = 0\n";
+        }
+        else if (key == 27 || key == 'q' || key == 'Q') {
             running.store(false);
             break;
         }
@@ -258,7 +267,10 @@ void Logic::controlLoop()
         const float steering_sent = remapSteeringForActuator(raw_steering_cmd);
         const int servo_command = static_cast<int>(std::lround(80.0f + steering_sent));
         std:: cout << "SERVO_COMMAND: " << servo_command << std::endl;
-        comm.sendCommands(desired_velocity, servo_command);
+        const float speed_cmd = drive_enabled.load() ? desired_velocity : 0.0f;
+        const int servo_safe = drive_enabled.load() ? servo_command : 80; // center
+        comm.sendCommands(speed_cmd, servo_safe);
+
 
         const long long timestamp_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
