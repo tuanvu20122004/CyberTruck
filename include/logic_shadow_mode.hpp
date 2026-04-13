@@ -12,33 +12,31 @@
 #include <atomic>
 #include <fstream>
 #include <mutex>
-#include <atomic>
 #include <string>
 
 class Logic {
 public:
     explicit Logic(const std::string& videoPath,
-                   const std::string& policyPath = "policy_export.json");
+                   const std::string& policyPath = "policy_export_finetuned.json");
     void run();
 
 private:
     void cameraLoop();
     void controlLoop();
+    void keyboardLoop();
     void openShadowCsv(const std::string& filename);
-    void logCsvRow(long long timestamp_ms,
-                   int frame_id,
-                   bool is_valid,
-                   bool fallback_to_mpc,
-                   const std::string& fallback_reason,
-                   const MpcState& state,
-                   float velocity,
-                   float prev_raw_steering,
-                   float raw_steering_policy,
-                   float raw_steering_expert,
-                   float raw_steering_executed,
-                   float steering_sent_executed,
-                   int servo_command,
-                   float lane_width_px);
+    void logShadowRow(long long timestamp_ms,
+                      int frame_id,
+                      const MpcState& state,
+                      float prev_raw_steering,
+                      float raw_steering_policy,
+                      float raw_steering_expert,
+                      float raw_steering_cmd,
+                      float steering_sent,
+                      int servo_command,
+                      bool fallback_to_mpc,
+                      const std::string& fallback_reason,
+                      float lane_width_px);
 
     LaneDetector  detector;
     MpcController mpc;
@@ -49,7 +47,7 @@ private:
     Logger        logger;
     std::ofstream shadow_csv;
 
-    const float desired_velocity = 0.04f;
+    const float desired_velocity = 0.15f;
     const float raw_abs_error_fallback_deg_ = 6.0f;
     const float max_raw_steering_deg_ = 28.0f;
     const float max_delta_policy_deg_ = 8.0f;
