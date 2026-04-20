@@ -16,43 +16,54 @@
 
 class Logic {
 public:
-    explicit Logic(const std::string& videoPath,
-                   const std::string& policyPath = "policy_export_finetuned.json");
+    Logic(const std::string& videoPath, const std::string& policyPath);
     void run();
 
 private:
     void cameraLoop();
     void controlLoop();
     void keyboardLoop();
+
     void openShadowCsv(const std::string& filename);
+
     void logShadowRow(long long timestamp_ms,
-                      int frame_id,
-                      const MpcState& state,
-                      float prev_raw_steering,
-                      float raw_steering_policy,
-                      float raw_steering_expert,
-                      float raw_steering_cmd,
-                      float steering_sent,
-                      int servo_command,
-                      bool fallback_to_mpc,
-                      const std::string& fallback_reason,
-                      float lane_width_px);
+                    int frame_id,
+                    const MpcState& state,
+                    float prev_raw_steering,
+                    float raw_steering_policy,
+                    float raw_steering_expert,
+                    float raw_steering_cmd,
+                    float raw_abs_error,
+                    double q_policy,
+                    double q_mpc,
+                    double q_gap,
+                    float steering_sent,
+                    int servo_command,
+                    bool fallback_to_mpc,
+                    const std::string& fallback_reason,
+                    float lane_width_px);
 
     LaneDetector  detector;
     MpcController mpc;
     Communication comm;
     Trans_UDP     udp_send;
     PolicyModel   policy_model;
-
     Logger        logger;
+
     std::ofstream shadow_csv;
 
-    const float desired_velocity = 0.15f;
-    const float raw_abs_error_fallback_deg_ = 6.0f;
+    float desired_velocity_ = 0.15f;
     const float max_raw_steering_deg_ = 28.0f;
-    const float max_delta_policy_deg_ = 8.0f;
     const int command_period_ms_ = 50;
-    const bool hold_last_on_invalid_state_ = true;
+
+    float raw_abs_error_fallback_deg_ = 6.0f;
+    float max_delta_policy_deg_ = 8.0f;
+    float delta_mismatch_fallback_deg_ = 3.0f;
+    float max_lateral_deviation_fallback_m_ = 0.12f;
+    float max_yaw_error_fallback_rad_ = 0.18f;
+    float max_curvature_fallback_ = 0.80f;
+    double q_gap_fallback_threshold_ = 50.0;
+    bool hold_last_on_invalid_state_ = true;
 
     std::atomic<bool> drive_enabled{false};
     std::atomic<bool> running{true};
@@ -61,4 +72,4 @@ private:
     int               frame_id_ = 0;
 };
 
-#endif // LOGIC_SHADOW_MODE_HPP
+#endif

@@ -2,13 +2,12 @@
 #include <stdexcept>
 #include "logic_shadow_mode.hpp"
 
-
 int main(int argc, char* argv[])
 {
-    std::cout << "=== Shadow mode: policy prediction + MPC control ===\n";
+    std::cout << "=== Policy control with MPC fallback ===\n";
 
     std::string videoPath = "/dev/video0";
-    std::string policyPath = "policy_export.json";
+    std::string policyPath = "bc_train.json";
 
     if (argc > 1) {
         videoPath = argv[1];
