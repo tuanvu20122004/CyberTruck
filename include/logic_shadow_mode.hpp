@@ -14,9 +14,26 @@
 #include <mutex>
 #include <string>
 
+enum class RunMode {
+    Shadow,        // chỉ log policy, ưu tiên MPC
+    PolicyRollout  // ưu tiên policy, MPC chỉ fallback khi unsafe
+};
+
+enum class ControlSource {
+    Policy = 0,
+    MpcFallback = 1,
+    HoldLast = 2,
+};
+
 class Logic {
 public:
-    Logic(const std::string& videoPath, const std::string& policyPath);
+    Logic(const std::string& videoPath,
+          const std::string& policyPath,
+          const std::string& modelName,
+          const std::string& csvPath,
+          RunMode runMode,
+          bool enableExactQ);
+
     void run();
 
 private:
@@ -27,21 +44,22 @@ private:
     void openShadowCsv(const std::string& filename);
 
     void logShadowRow(long long timestamp_ms,
-                    int frame_id,
-                    const MpcState& state,
-                    float prev_raw_steering,
-                    float raw_steering_policy,
-                    float raw_steering_expert,
-                    float raw_steering_cmd,
-                    float raw_abs_error,
-                    double q_policy,
-                    double q_mpc,
-                    double q_gap,
-                    float steering_sent,
-                    int servo_command,
-                    bool fallback_to_mpc,
-                    const std::string& fallback_reason,
-                    float lane_width_px);
+                      int frame_id,
+                      const MpcState& state,
+                      float prev_raw_steering,
+                      float raw_steering_policy,
+                      float raw_steering_expert,
+                      float raw_steering_cmd,
+                      float raw_abs_error,
+                      double q_policy,
+                      double q_mpc,
+                      double q_gap,
+                      float steering_sent,
+                      int servo_command,
+                      bool fallback_to_mpc,
+                      ControlSource control_source,
+                      const std::string& fallback_reason,
+                      float lane_width_px);
 
     LaneDetector  detector;
     MpcController mpc;
@@ -51,6 +69,11 @@ private:
     Logger        logger;
 
     std::ofstream shadow_csv;
+
+    std::string model_name_;
+    std::string csv_path_;
+    RunMode run_mode_;
+    bool enable_exact_q_;
 
     float desired_velocity_ = 0.15f;
     const float max_raw_steering_deg_ = 28.0f;

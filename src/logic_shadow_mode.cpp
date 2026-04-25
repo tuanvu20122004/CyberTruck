@@ -77,13 +77,22 @@ int readKeyNonBlocking()
     return -1;
 }
 
-Logic::Logic(const std::string& videoPath, const std::string& policyPath)
+Logic::Logic(const std::string& videoPath,
+             const std::string& policyPath,
+             const std::string& modelName,
+             const std::string& csvPath,
+             RunMode runMode,
+             bool enableExactQ)
     : detector(videoPath, 640, 480),
       mpc(),
       comm("/dev/ttyACM0", 115200),
       udp_send("192.168.1.103", 9996),
       policy_model(policyPath),
-      logger("policy_hybrid_runtime_log.txt")
+      logger(modelName + "_runtime_log.txt"),
+      model_name_(modelName),
+      csv_path_(csvPath),
+      run_mode_(runMode),
+      enable_exact_q_(enableExactQ)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
@@ -96,19 +105,25 @@ Logic::Logic(const std::string& videoPath, const std::string& policyPath)
         throw std::runtime_error("[LOGIC] Policy model not loaded");
     }
 
-    openShadowCsv("policy_hybrid_log.csv");
-    std::cout << "[LOGIC] BC-policy + MPC-fallback + ExactQ logging started with policy JSON: "
-              << policyPath << std::endl;
+    openShadowCsv(csv_path_);
+
+    std::cout << "[LOGIC] model=" << model_name_
+              << " policy=" << policyPath
+              << " csv=" << csv_path_
+              << " run_mode=" << (run_mode_ == RunMode::PolicyRollout ? "policy_rollout" : "shadow")
+              << " exact_q=" << (enable_exact_q_ ? "on" : "off")
+              << std::endl;
 }
 
 void Logic::openShadowCsv(const std::string& filename)
 {
     shadow_csv.open(filename, std::ios::out | std::ios::trunc);
     if (!shadow_csv.is_open()) {
-        throw std::runtime_error("[LOGIC] Cannot open hybrid CSV: " + filename);
+        throw std::runtime_error("[LOGIC] Cannot open CSV: " + filename);
     }
 
     shadow_csv
+        << "model_name,run_mode,"
         << "timestamp_ms,frame_id,is_valid,"
         << "lateral_deviation,yaw_angle,"
         << "curvature_0,curvature_1,curvature_2,curvature_3,"
@@ -117,7 +132,7 @@ void Logic::openShadowCsv(const std::string& filename)
         << "raw_abs_error,"
         << "q_policy,q_mpc,q_gap,"
         << "steering_sent,servo_command,"
-        << "fallback_to_mpc,fallback_reason,"
+        << "fallback_to_mpc,control_source,fallback_reason,"
         << "lane_width_px\n";
 }
 
@@ -135,6 +150,7 @@ void Logic::logShadowRow(long long timestamp_ms,
                          float steering_sent,
                          int servo_command,
                          bool fallback_to_mpc,
+                         ControlSource control_source,
                          const std::string& fallback_reason,
                          float lane_width_px)
 {
@@ -142,7 +158,9 @@ void Logic::logShadowRow(long long timestamp_ms,
         return;
     }
 
-    shadow_csv << timestamp_ms << ','
+    shadow_csv << '"' << model_name_ << '"' << ','
+               << '"' << (run_mode_ == RunMode::PolicyRollout ? "policy_rollout" : "shadow") << '"' << ','
+               << timestamp_ms << ','
                << frame_id << ','
                << (state.is_valid ? 1 : 0) << ','
                << state.lateral_deviation << ','
@@ -151,7 +169,7 @@ void Logic::logShadowRow(long long timestamp_ms,
                << (state.curvature.size() > 1 ? state.curvature[1] : 0.0f) << ','
                << (state.curvature.size() > 2 ? state.curvature[2] : 0.0f) << ','
                << (state.curvature.size() > 3 ? state.curvature[3] : 0.0f) << ','
-               << desired_velocity_ << ','
+               << (drive_enabled.load() ? desired_velocity_ : 0.0f) << ','
                << prev_raw_steering << ','
                << raw_steering_policy << ','
                << raw_steering_expert << ','
@@ -163,6 +181,7 @@ void Logic::logShadowRow(long long timestamp_ms,
                << steering_sent << ','
                << servo_command << ','
                << (fallback_to_mpc ? 1 : 0) << ','
+               << static_cast<int>(control_source) << ','
                << '"' << fallback_reason << '"' << ','
                << lane_width_px
                << '\n';
@@ -195,6 +214,11 @@ void Logic::keyboardLoop()
             break;
         }
 
+        else if (key == 'n') {
+            std::cout << "[KEY] Next model (stop current run)\n";
+            running = false;   // 🔥 QUAN TRỌNG
+        }
+        
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
@@ -230,14 +254,7 @@ void Logic::controlLoop()
 
     float prev_raw_steering_policy = 0.0f;
     float prev_raw_steering_expert = 0.0f;
-
-    const float kAbsPolicyExpertErrDeg = 3.0f;
-    const float kMaxDeltaPolicyDeg     = 4.0f;
-    const float kDeltaMismatchDeg      = 2.0f;
-    const float kMaxAbsEy              = 0.10f;
-    const float kMaxAbsYaw             = 0.15f;
-    const float kMaxAbsCurvature       = 0.80f;
-    const double kQGapFallback         = 20.0;
+    float last_cmd_raw = 0.0f;
 
     while (running.load()) {
         next_time += std::chrono::milliseconds(command_period_ms_);
@@ -253,20 +270,11 @@ void Logic::controlLoop()
         }
 
         detector.processFrame(frame_local);
-        const auto centerline = detector.getCenterline();
-        const auto bird = detector.getBirdEyeView();
-        MpcState state = mpc.computeMpcParameters(centerline, bird);
+        const MpcState state = detector.computeMpcState();
 
-        float raw_steering_policy = 0.0f;
-        float raw_steering_expert = 0.0f;
-        float raw_steering_cmd    = 0.0f;
-
-        bool fallback_to_mpc = false;
-        std::string fallback_reason = "policy";
-
-        double q_policy = std::numeric_limits<double>::quiet_NaN();
-        double q_mpc    = std::numeric_limits<double>::quiet_NaN();
-        double q_gap    = std::numeric_limits<double>::quiet_NaN();
+        float raw_steering_policy = prev_raw_steering_policy;
+        float raw_steering_expert = prev_raw_steering_expert;
+        float raw_steering_cmd    = prev_raw_steering_policy;
 
         float abs_policy_expert_err = 0.0f;
         float delta_policy = 0.0f;
@@ -274,19 +282,31 @@ void Logic::controlLoop()
         float delta_mismatch = 0.0f;
         float kappa_max = 0.0f;
 
+        bool fallback_to_mpc = false;
+        std::string fallback_reason = "policy";
+        ControlSource control_source = ControlSource::Policy;
+
+        double q_policy = std::numeric_limits<double>::quiet_NaN();
+        double q_mpc    = std::numeric_limits<double>::quiet_NaN();
+        double q_gap    = std::numeric_limits<double>::quiet_NaN();
+
         if (!state.is_valid) {
             fallback_to_mpc = true;
             fallback_reason = "invalid_state";
-            raw_steering_policy = prev_raw_steering_policy;
-            raw_steering_expert = prev_raw_steering_expert;
-            raw_steering_cmd    = prev_raw_steering_expert;
+
+            if (hold_last_on_invalid_state_) {
+                raw_steering_cmd = last_cmd_raw;
+                control_source = ControlSource::HoldLast;
+            } else {
+                raw_steering_cmd = prev_raw_steering_expert;
+                control_source = ControlSource::MpcFallback;
+            }
         } else {
             const PolicyModel::FeatureVector features =
                 PolicyModel::buildFeatures(state, desired_velocity_, prev_raw_steering_policy);
 
             raw_steering_policy = policy_model.infer(features);
             raw_steering_expert = mpc.computeSteeringAngle(state, desired_velocity_);
-            raw_steering_cmd    = raw_steering_policy;
 
             abs_policy_expert_err = std::abs(raw_steering_policy - raw_steering_expert);
             delta_policy = raw_steering_policy - prev_raw_steering_policy;
@@ -297,44 +317,60 @@ void Logic::controlLoop()
             const float yaw_abs = std::abs(state.yaw_angle);
             kappa_max = maxAbsCurvature4(state);
 
-            q_policy = mpc.evaluateExactQ(state, desired_velocity_, raw_steering_policy);
-            q_mpc    = mpc.evaluateExactQ(state, desired_velocity_, raw_steering_expert);
+            if (enable_exact_q_) {
+                q_policy = mpc.evaluateExactQ(state, desired_velocity_, raw_steering_policy);
+                q_mpc    = mpc.evaluateExactQ(state, desired_velocity_, raw_steering_expert);
 
-            if (std::isfinite(q_policy) && std::isfinite(q_mpc)) {
-                q_gap = q_policy - q_mpc;
-            }
-
-            if (abs_policy_expert_err > kAbsPolicyExpertErrDeg) {
-                fallback_to_mpc = true;
-                fallback_reason = "abs_policy_expert_err";
-            }
-            else if (std::abs(delta_policy) > kMaxDeltaPolicyDeg) {
-                fallback_to_mpc = true;
-                fallback_reason = "delta_policy";
-            }
-            else if (delta_mismatch > kDeltaMismatchDeg) {
-                fallback_to_mpc = true;
-                fallback_reason = "delta_mismatch";
-            }
-            else if (ey_abs > kMaxAbsEy) {
-                fallback_to_mpc = true;
-                fallback_reason = "large_lateral_deviation";
-            }
-            else if (yaw_abs > kMaxAbsYaw) {
-                fallback_to_mpc = true;
-                fallback_reason = "large_yaw_error";
-            }
-            else if (kappa_max > kMaxAbsCurvature) {
-                fallback_to_mpc = true;
-                fallback_reason = "high_curvature";
-            }
-            else if (std::isfinite(q_gap) && q_gap > kQGapFallback) {
-                fallback_to_mpc = true;
-                fallback_reason = "exact_q_gap";
+                if (std::isfinite(q_policy) && std::isfinite(q_mpc)) {
+                    q_gap = q_policy - q_mpc;
+                }
             }
 
-            if (fallback_to_mpc) {
+            // --- default command selection ---
+            if (run_mode_ == RunMode::PolicyRollout) {
+                raw_steering_cmd = raw_steering_policy;
+                control_source = ControlSource::Policy;
+            } else {
                 raw_steering_cmd = raw_steering_expert;
+                control_source = ControlSource::MpcFallback;
+                fallback_reason = "shadow_mode_mpc";
+            }
+
+            // --- safety arbitration ---
+            if (run_mode_ == RunMode::PolicyRollout) {
+                if (abs_policy_expert_err > raw_abs_error_fallback_deg_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "abs_policy_expert_err";
+                }
+                else if (std::abs(delta_policy) > max_delta_policy_deg_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "delta_policy";
+                }
+                else if (delta_mismatch > delta_mismatch_fallback_deg_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "delta_mismatch";
+                }
+                else if (ey_abs > max_lateral_deviation_fallback_m_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "large_lateral_deviation";
+                }
+                else if (yaw_abs > max_yaw_error_fallback_rad_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "large_yaw_error";
+                }
+                else if (kappa_max > max_curvature_fallback_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "high_curvature";
+                }
+                else if (enable_exact_q_ && std::isfinite(q_gap) && q_gap > q_gap_fallback_threshold_) {
+                    fallback_to_mpc = true;
+                    fallback_reason = "exact_q_gap";
+                }
+
+                if (fallback_to_mpc) {
+                    raw_steering_cmd = raw_steering_expert;
+                    control_source = ControlSource::MpcFallback;
+                }
             }
         }
 
@@ -368,21 +404,24 @@ void Logic::controlLoop()
                      steering_sent,
                      servo_command,
                      fallback_to_mpc,
+                     control_source,
                      fallback_reason,
                      detector.getLaneWidthPx());
 
-        std::cout << "[HYBRID] frame=" << current_frame_id
-                  << " mode=" << (fallback_to_mpc ? "MPC" : "POLICY")
+        std::cout << "[ROLLOUT] model=" << model_name_
+                  << " frame=" << current_frame_id
+                  << " mode=" << (run_mode_ == RunMode::PolicyRollout ? "policy_rollout" : "shadow")
+                  << " src=" << static_cast<int>(control_source)
                   << " raw_policy=" << raw_steering_policy
                   << " raw_expert=" << raw_steering_expert
                   << " raw_cmd=" << raw_steering_cmd
-                  << " abs_err=" << abs_policy_expert_err
                   << " q_gap=" << q_gap
                   << " reason=" << fallback_reason
                   << std::endl;
 
         prev_raw_steering_policy = raw_steering_policy;
         prev_raw_steering_expert = raw_steering_expert;
+        last_cmd_raw = raw_steering_cmd;
 
         std::this_thread::sleep_until(next_time);
     }
