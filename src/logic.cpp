@@ -65,7 +65,7 @@ Logic::Logic(const std::string& videoPath)
     planner.setLaneWidthMeters(0.40f); //Giá trị cần tune lại
     planner.setVehicleSize(0.21f, 0.432f);// Giá trị cần tune lại
     planner.setObstacleSize(0.20f, 0.22f);// Giá trị cần tune lại
-    planner.setSafeMargin(0.08f);// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
+    planner.setSafeMargin(0.1f);// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
     planner.setSpeed(desired_velocity);
     planner.setTriggerDistance(1.1f);
 
@@ -249,28 +249,41 @@ void Logic::run()
                 if (state.is_valid)
                 {
                     float steering;
-                    if(control_mode == ControlMode::MPC)
+                    // Obstacle gate:
+                    // - distance = -1.0f nghĩa là không có obstacle hợp lệ
+                    // - chỉ dùng target_centerline khi obstacle tồn tại và nằm trong trigger 1.1m
+                    const bool has_obstacle = (distance > 0.05f);
+                    const bool avoid_obstacle = has_obstacle && (distance <= 1.1f);
+
+                    if (control_mode == ControlMode::MPC)
                     {
-                        if(distance >1.1f){
+                        if (!avoid_obstacle)
+                        {
                             steering = mpc.computeSteeringAngle(state1, desired_velocity);
                         }
                         else
+                        {
                             steering = mpc.computeSteeringAngle(state, desired_velocity);
+                        }
                     }
                     else // PURE_PURSUIT
                     {
-                            if (distance > 1.1f)
+                        if (!avoid_obstacle)
+                        {
                             steering = pure_pursuit.computeSteeringAngle(
                                 base_centerline,
                                 birdEyeView.size(),
                                 desired_velocity
                             );
+                        }
                         else
+                        {
                             steering = pure_pursuit.computeSteeringAngle(
                                 target_centerline,
                                 birdEyeView.size(),
                                 desired_velocity
                             );
+                        }
                     }
                     
                     if (control_mode == ControlMode::MPC)

@@ -48,8 +48,8 @@ private:
 
     ControlMode control_mode = ControlMode::PURE_PURSUIT;
 
-    // Đồng bộ với planner: vx = 0.08 m/s
-    const float desired_velocity = 0.08f;
+    // Đồng bộ với planner: vx = 0.15 m/s
+    const float desired_velocity = 0.15f;
 
     // Thời gian giữ obstacle cũ nếu YOLO mất detection tạm thời
     const int obstacle_timeout_ms = 2000;

@@ -9,17 +9,17 @@ LaneChangePlanner::LaneChangePlanner()
     : state_(PlannerState::KEEP_LANE),
       last_direction_(DONT_CHANGE),
       hold_counter_(0),// Số frame còn lại để giữ trạng thái đổi lane sau khi đã quyết định đổi lane, tránh việc đổi lane liên tục qua lại
-      hold_frames_(10),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
+      hold_frames_(20),// Số frame cần giữ trạng thái đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       settle_counter_(0),// số frame cooldown sau khi vừa kết thúc đổi làn
-      settle_frames_(8),// số frame khóa đổi ngược ngay sau khi vừa hoàn tất đổi làn
+      settle_frames_(12),// số frame khóa đổi ngược ngay sau khi vừa hoàn tất đổi làn
       trigger_distance_(1.1f),// khoảng cách kích hoạt đổi lane, khi obstacle ở khoảng cách này thì planner sẽ bắt đầu cân nhắc đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
       lane_width_m_(0.40f),// Giá trị cần tune lại
       vehicle_width_m_(0.21f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng của xe mình
       vehicle_length_m_(0.432f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều dài của xe mình
       obstacle_width_m_(0.20f),// da tune lại cho phù hợp với kích thước của obstacle, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng ước lượng của obstacle cần tránh, có thể là xe đạp, xe máy hoặc người đi bộ
       obstacle_length_m_(0.22f),// da tune lại cho phù hợp với kích thước của obstacle, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều dài ước lượng của obstacle cần tránh, có thể là xe đạp, xe máy hoặc người đi bộ
-      safe_margin_m_(0.08f),// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
-      vx_mps_(0.08f),
+      safe_margin_m_(0.1f),// Giá trị cần tune lại nếu thấy xe đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là khoảng cách an toàn giữa xe mình với obstacle khi đổi lane
+      vx_mps_(0.15f),
       meter_per_pixel_(0.001f),// Giá trị mặc định, sẽ được cập nhật lại khi có lane width hợp lệ
       last_min_distance_m_(std::numeric_limits<float>::infinity()),// khoảng cách nhỏ nhất đến obstacle của quỹ đạo đã chọn ở lần cập nhật trước, dùng để theo dõi và debug
       last_min_ttc_s_(std::numeric_limits<float>::infinity()),// thời gian va chạm nhỏ nhất của quỹ đạo đã chọn ở lần cập nhật trước, dùng để theo dõi và debug
@@ -272,7 +272,9 @@ LaneChangePlanner::generateCandidates(
     candidates.push_back(makeKeepLaneCandidate(ref));
 
     // Bộ T phù hợp hơn với vx = 0.08 m/s
-    static const std::array<float, 4> T_SET = {0.80f, 1.00f, 1.20f, 1.50f};
+    static const std::array<float, 5> T_SET = {
+    1.5f, 2.0f, 2.5f, 3.0f, 3.5f
+};
 
     // đổi lane
     if (allow_left)
@@ -313,7 +315,7 @@ LaneChangePlanner::makeLaneChangeCandidate(
     Candidate c;
     c.target_lane = target_lane;
     c.maneuver_time_s = maneuver_time_s;
-    c.lane_change_distance_m = std::max(0.15f, vx_mps_ * maneuver_time_s);
+    c.lane_change_distance_m = std::max(0.45f, vx_mps_ * maneuver_time_s);
     c.target_offset_m = static_cast<float>(target_lane) * lane_width_m_;
     c.polyline_px = offsetReferenceToPolyline(ref, c);
     c.feasible = (c.polyline_px.size() >= 3);
@@ -416,7 +418,7 @@ void LaneChangePlanner::evaluateCandidate(
     //khoảng cách tổi thiểu planner muốn giữ với obstacle
     const float desired_dist = std::max(lat_clear + 0.05f, 0.18f);
     // ngưỡng ttc an toàn
-    const float ttc_threshold = 1.5f;
+    const float ttc_threshold = 2.5f;
 
     const float dist_cost =
         (c.min_distance_m >= desired_dist) // so sánh khoảng cách đủ lớn ko
