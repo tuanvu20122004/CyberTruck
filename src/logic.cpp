@@ -7,6 +7,11 @@
 #include <fstream>
 #include <iomanip>
 
+#include <thread>
+#include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
+
 namespace
 {
 const char* plannerStateToString(PlannerState s)
@@ -30,6 +35,29 @@ const char* plannerDirToString(Type_Change_t d)
     default:           return "NONE";
     }
 }
+}
+
+int getch_nonblock()
+{
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+    ch = getchar();
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+    return ch;
 }
 
 void bindToCore(int core_id)
@@ -89,6 +117,52 @@ void Logic::setControlMode(ControlMode mode)
         std::cout << "[LOGIC] Using Pure Pursuit controller\n";
 }
 
+// hàm đọc phím từ terminal
+int getch_nonblock()
+{
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+    ch = getchar();
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+    return ch;
+}
+
+// luồng đọc input
+void keyboardThread(std::atomic<bool>& running_flag)
+{
+    while (true)
+    {
+        int key = getch_nonblock();
+
+        if (key == 'R' || key == 'r')
+        {
+            running_flag = true;
+            std::cout << "[CMD] RUN\n";
+        }
+        else if (key == 'S' || key == 's')
+        {
+            running_flag = false;
+            std::cout << "[CMD] STOP\n";
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 void Logic::run()
 {
     std::ofstream log_file("planner_log.txt", std::ios::out | std::ios::trunc);
@@ -115,6 +189,9 @@ void Logic::run()
     }
 
     auto run_start = std::chrono::steady_clock::now();
+
+    // luồng đọc tín hiệu từ t
+    std::thread kb_thread(keyboardThread, std::ref(is_running));
 
     std::thread camera_thread([&]()
     {
@@ -248,44 +325,56 @@ void Logic::run()
 
                 if (state.is_valid)
                 {
-                    float steering;
+                    float steering = 0.0f;
+                    float velocity_cmd = 0.0f;
                     // Obstacle gate:
                     // - distance = -1.0f nghĩa là không có obstacle hợp lệ
                     // - chỉ dùng target_centerline khi obstacle tồn tại và nằm trong trigger 1.1m
                     const bool has_obstacle = (distance > 0.05f);
                     const bool avoid_obstacle = has_obstacle && (distance <= 1.1f);
 
-                    if (control_mode == ControlMode::MPC)
+                    if(is_running == true)
                     {
-                        if (!avoid_obstacle)
+                        if (control_mode == ControlMode::MPC)
                         {
-                            steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                            if (!avoid_obstacle)
+                            {
+                                steering = mpc.computeSteeringAngle(state1, desired_velocity);
+                            }
+                            else
+                            {
+                                steering = mpc.computeSteeringAngle(state, desired_velocity);
+                            }
                         }
-                        else
+
+                        else // PURE_PURSUIT
                         {
-                            steering = mpc.computeSteeringAngle(state, desired_velocity);
+                            if (!avoid_obstacle)
+                            {
+                                steering = pure_pursuit.computeSteeringAngle(
+                                    base_centerline,
+                                    birdEyeView.size(),
+                                    desired_velocity
+                                );
+                            }
+                            else
+                            {
+                                steering = pure_pursuit.computeSteeringAngle(
+                                    target_centerline,
+                                    birdEyeView.size(),
+                                    desired_velocity
+                                );
+                            }
                         }
                     }
-                    else // PURE_PURSUIT
+
+                    else
                     {
-                        if (!avoid_obstacle)
-                        {
-                            steering = pure_pursuit.computeSteeringAngle(
-                                base_centerline,
-                                birdEyeView.size(),
-                                desired_velocity
-                            );
-                        }
-                        else
-                        {
-                            steering = pure_pursuit.computeSteeringAngle(
-                                target_centerline,
-                                birdEyeView.size(),
-                                desired_velocity
-                            );
-                        }
+                        // STOP override
+                        steering = 0.0f;
+                        velocity = 0.0f;
                     }
-                    
+
                     if (control_mode == ControlMode::MPC)
                     {
                         steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
@@ -301,7 +390,7 @@ void Logic::run()
 
                     int servo = static_cast<int>(std::lround(97.0f + steering));
 
-                    float velocity_cmd = desired_velocity;
+                    velocity_cmd = desired_velocity;
                     comm.sendCommands(velocity_cmd, servo);
 
                     if (planner.getState() != prev_state && log_file.is_open())
@@ -363,11 +452,15 @@ void Logic::run()
         }
     });
 
+
+    
     while (running.load())
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     if (camera_thread.joinable()) camera_thread.join();
     if (mpc_thread.joinable()) mpc_thread.join();
+    if (kb_thread.joinable()) kb_thread.join();
+
 
     if (log_file.is_open())
         log_file.close();

@@ -53,6 +53,7 @@ private:
 
     // Thời gian giữ obstacle cũ nếu YOLO mất detection tạm thời
     const int obstacle_timeout_ms = 2000;
+    std::atomic<bool> is_running{false};
 
     std::atomic<bool> running{true};
     std::mutex        frame_mutex;
