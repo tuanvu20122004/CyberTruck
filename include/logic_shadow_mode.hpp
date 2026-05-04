@@ -14,25 +14,16 @@
 #include <mutex>
 #include <string>
 
-enum class RunMode {
-    Shadow,        // chỉ log policy, ưu tiên MPC
-    PolicyRollout  // ưu tiên policy, MPC chỉ fallback khi unsafe
-};
-
-enum class ControlSource {
-    Policy = 0,
-    MpcFallback = 1,
-    HoldLast = 2,
-};
-
 class Logic {
 public:
+    // runMode:
+    //   "dagger" : policy controls when safe; MPC is queried as expert and used as safety fallback.
+    //   "shadow" : MPC controls; policy is only logged for evaluation.
+    //   "expert" : MPC controls and the log can be used as an expert dataset D0.
     Logic(const std::string& videoPath,
           const std::string& policyPath,
-          const std::string& modelName,
-          const std::string& csvPath,
-          RunMode runMode,
-          bool enableExactQ);
+          const std::string& logPrefix = "dagger_run",
+          const std::string& runMode = "dagger");
 
     void run();
 
@@ -42,7 +33,6 @@ private:
     void keyboardLoop();
 
     void openShadowCsv(const std::string& filename);
-
     void logShadowRow(long long timestamp_ms,
                       int frame_id,
                       const MpcState& state,
@@ -51,13 +41,15 @@ private:
                       float raw_steering_expert,
                       float raw_steering_cmd,
                       float raw_abs_error,
+                      float delta_policy,
+                      float delta_expert,
+                      float delta_mismatch,
                       double q_policy,
                       double q_mpc,
                       double q_gap,
                       float steering_sent,
                       int servo_command,
                       bool fallback_to_mpc,
-                      ControlSource control_source,
                       const std::string& fallback_reason,
                       float lane_width_px);
 
@@ -69,16 +61,14 @@ private:
     Logger        logger;
 
     std::ofstream shadow_csv;
-
-    std::string model_name_;
-    std::string csv_path_;
-    RunMode run_mode_;
-    bool enable_exact_q_;
+    std::string   log_prefix_;
+    std::string   run_mode_;
 
     float desired_velocity_ = 0.15f;
     const float max_raw_steering_deg_ = 28.0f;
     const int command_period_ms_ = 50;
 
+    // Safety fallback thresholds for DAgger collection.
     float raw_abs_error_fallback_deg_ = 6.0f;
     float max_delta_policy_deg_ = 8.0f;
     float delta_mismatch_fallback_deg_ = 3.0f;
@@ -87,6 +77,11 @@ private:
     float max_curvature_fallback_ = 0.80f;
     double q_gap_fallback_threshold_ = 50.0;
     bool hold_last_on_invalid_state_ = true;
+    bool log_only_when_drive_enabled_ = true;
+
+    float prev_raw_steering_policy_ = 0.0f;
+    float prev_raw_steering_expert_ = 0.0f;
+    int   last_servo_command_ = 80;
 
     std::atomic<bool> drive_enabled{false};
     std::atomic<bool> running{true};
