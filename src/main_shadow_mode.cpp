@@ -8,8 +8,8 @@ int main(int argc, char* argv[])
     std::cout << "=== Policy control / DAgger collection with MPC fallback ===\n";
 
     std::string videoPath = "/dev/video0";
-    std::string policyPath = "bc_train.json";
-    std::string logPrefix = "dagger_run";
+    std::string policyPath = "exact_q_train.json";
+    std::string logPrefix = "dagger_exactq";
     std::string runMode = "dagger";
 
     if (argc > 1) {

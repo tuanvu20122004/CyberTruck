@@ -99,7 +99,7 @@ Logic::Logic(const std::string& videoPath,
     : detector(videoPath, 640, 480),
       mpc(),
       comm("/dev/ttyACM0", 115200),
-      udp_send("192.168.1.103", 9996),
+      udp_send("192.168.0.100", 9996),
       policy_model(policyPath),
       logger(logPrefix + "_runtime_log.txt"),
       log_prefix_(logPrefix),
@@ -120,7 +120,7 @@ Logic::Logic(const std::string& videoPath,
         throw std::runtime_error("[LOGIC] Policy model not loaded");
     }
 
-    openShadowCsv(log_prefix_ + "_shadow_log.csv");
+    openShadowCsv(log_prefix_ + ".csv");
 
     std::cout << "[LOGIC] DAgger/evaluation logging started\n"
               << "        policy JSON : " << policyPath << '\n'
@@ -290,6 +290,11 @@ void Logic::controlLoop()
         detector.processFrame(frame_local);
         MpcState state = mpc.computeMpcParameters(detector.getCenterline(), detector.getBirdEyeView());
 
+        // Gửi bird-eye view về server
+        cv::Mat bird = detector.getBirdEyeView();
+        if (!bird.empty()) {
+            udp_send.sendFrame(bird, 45);   // thử quality 40–50 trước
+        }
         float raw_steering_policy = prev_raw_steering_policy_;
         float raw_steering_expert = prev_raw_steering_expert_;
         float raw_steering_cmd = prev_raw_steering_expert_;
@@ -390,6 +395,7 @@ void Logic::controlLoop()
         const float steering_sent = remapSteeringForActuator(raw_steering_cmd);
         const int servo_command = static_cast<int>(std::lround(93.5f + steering_sent));
         last_servo_command_ = servo_command;
+        const int servo_safe = drive_enabled.load() ? servo_command : 80;
 
         detector.setSteeringInfo(raw_steering_cmd, servo_command);
         if (state.is_valid) {
@@ -397,7 +403,7 @@ void Logic::controlLoop()
         }
 
         const float speed_cmd = drive_enabled.load() ? desired_velocity_ : 0.0f;
-        const int servo_safe = drive_enabled.load() ? servo_command : 80;
+
         comm.sendCommands(speed_cmd, servo_safe);
 
         const long long timestamp_ms =

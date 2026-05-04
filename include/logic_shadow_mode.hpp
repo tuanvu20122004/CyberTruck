@@ -64,7 +64,7 @@ private:
     std::string   log_prefix_;
     std::string   run_mode_;
 
-    float desired_velocity_ = 0.15f;
+    float desired_velocity_ = 0.08f;
     const float max_raw_steering_deg_ = 28.0f;
     const int command_period_ms_ = 50;
 
