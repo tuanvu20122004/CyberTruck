@@ -37,28 +37,6 @@ const char* plannerDirToString(Type_Change_t d)
 }
 }
 
-int getch_nonblock()
-{
-    struct termios oldt, newt;
-    int ch;
-    int oldf;
-
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-
-    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
-
-    ch = getchar();
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    fcntl(STDIN_FILENO, F_SETFL, oldf);
-
-    return ch;
-}
 
 void bindToCore(int core_id)
 {
@@ -79,8 +57,8 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.104", 9996, 8888),
-      udp_debug("192.168.1.104", 9997)
+      udp_yolo("192.168.1.101", 9996, 8888),
+      udp_debug("192.168.1.101", 9997)
 {
     mpc.init(1000.0f, 50.0f, 5.0f);
     mpc.debugMatrices();
@@ -159,7 +137,7 @@ void keyboardThread(std::atomic<bool>& running_flag)
             std::cout << "[CMD] STOP\n";
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
 
@@ -218,7 +196,7 @@ void Logic::run()
 
             auto now = std::chrono::steady_clock::now();
             if (!frame_yolo.empty() &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_yolo_send).count() >= 50)
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_yolo_send).count() >= 20)
             {
                 last_yolo_send = now;
                 udp_yolo.sendFrame(frame_yolo, 85);
@@ -319,7 +297,7 @@ void Logic::run()
             
             auto now = std::chrono::steady_clock::now();
 
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 50)
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_send).count() >= 20)
             {
                 last_send = now;
 
@@ -335,6 +313,7 @@ void Logic::run()
 
                     if(is_running == true)
                     {
+                        velocity_cmd = desired_velocity;
                         if (control_mode == ControlMode::MPC)
                         {
                             if (!avoid_obstacle)
@@ -372,12 +351,12 @@ void Logic::run()
                     {
                         // STOP override
                         steering = 0.0f;
-                        velocity = 0.0f;
+                        velocity_cmd = 0.0;
                     }
 
                     if (control_mode == ControlMode::MPC)
                     {
-                        steering = 1.5f * std::pow(steering, 3) + 2.0f * steering;
+                        steering = 0.02f * std::pow(steering, 3) + 1.5f * steering;
                     }
                     else
                     {
@@ -388,9 +367,9 @@ void Logic::run()
                     if (steering <= -25.0f) steering = -25.0f;
                     else if (steering >= 25.0f) steering = 25.0f;
 
-                    int servo = static_cast<int>(std::lround(97.0f + steering));
+                    int servo = static_cast<int>(std::lround(94.0f + steering));
 
-                    velocity_cmd = desired_velocity;
+                    
                     comm.sendCommands(velocity_cmd, servo);
 
                     if (planner.getState() != prev_state && log_file.is_open())
@@ -407,7 +386,7 @@ void Logic::run()
                         prev_state = planner.getState();
                     }
 
-                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count() >= 100)
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count() >= 50)
                     {
                         last_log_time = now;
 
