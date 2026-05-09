@@ -361,7 +361,7 @@ void Logic::run()
                     else
                     {
                         // Pure Pursuit 
-                        steering = steering;
+                        steering = 0.02f * std::pow(steering, 3) + 1.2f * steering;
                     }
 
                     if (steering <= -25.0f) steering = -25.0f;
