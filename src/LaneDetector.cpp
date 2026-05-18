@@ -178,7 +178,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
             float x_right = evalX(right_coeffs, height - 1.0f);
             float lane_width = std::fabs(x_right - x_left);
 
-            if (lane_width > 200.0f && lane_width < 600.0f) {
+            if (lane_width > 100.0f && lane_width < 600.0f) {
                 initialized = true;
             } else {
                 initialized = false;
@@ -272,7 +272,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
                         << " CENTER=" << center << std::endl;
 
                 // Nếu 2 lane quá gần nhau => khả năng đang cùng bám 1 lane
-                if (lane_width_avg < 275.0f) {
+                if (lane_width_avg < 350.0f) {
 
                     // Cả hai đều nằm bên trái tâm ảnh:
                     // nhiều khả năng chỉ còn lane trái thật, lane phải bị bám nhầm
@@ -323,7 +323,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
 
         if (left_ok) {
             float slope_left = computeLaneSlope(left_coeffs, static_cast<float>(mid_y));
-            if (std::fabs(slope_left) > 5.0f) {
+            if (std::fabs(slope_left) > 8.0f) {
                 error_lane = true;
                 std::cout << "[ERR] slope_left=" << slope_left << std::endl;
             }
@@ -331,7 +331,7 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
 
         if (right_ok) {
             float slope_right = computeLaneSlope(right_coeffs, static_cast<float>(mid_y));
-            if (std::fabs(slope_right) > 5.0f) {
+            if (std::fabs(slope_right) > 8.0f) {
                 error_lane = true;
                 std::cout << "[ERR] slope_right=" << slope_right << std::endl;
             }
@@ -386,9 +386,13 @@ void LaneDetector::processFrame(cv::Mat& frame_resize) {
         float x_right = evalX(right_coeffs, y_ref);
         // cần xem xét lại chỗ này để upadate trong lanechangeplanner
         float lane_width = std::fabs(x_right - x_left);
-        if (lane_width > 80.0f && lane_width < 500.0f) {
+        if (lane_width > 350.0f && lane_width < 550.0f) {
             lane_width_px_ = lane_width;
         }
+    }
+    else
+    {
+        lane_width_px_ = 400;
     }
 }
 #endif
@@ -396,7 +400,7 @@ float LaneDetector::getLaneWidthPx() {
     if (has_left_lane_ && has_right_lane_) {
         return lane_width_px_;
     } else {
-        return 350.0f; // Giá trị mặc định, cần tune lại dựa trên thực tế
+        return 400.0f; // Giá trị mặc định, cần tune lại dựa trên thực tế
     }
 }
 cv::Mat LaneDetector::applyIPM(cv::Mat& frame)
@@ -663,18 +667,18 @@ std::vector<cv::Point> LaneDetector::computeCenterline(cv::Vec3f coeff_left,
         float d;
         for (int y = 0; y < outImg.rows; y += 20) {
             d = fabs(evalX(coeff_right, y) - evalX(coeff_left, y));  
-            if (d > 50 && d < 600)  
+            if (d > 100 && d < 600)  
                 widths.push_back(d);
         }
         if (!widths.empty()) {
-            float sum =0;
+            float sum = 0;
             for(auto b: widths) sum += b;
             laneW_avg = sum/widths.size();
         }
     }
 
     float current_laneW;
-    if(laneW_avg < 395.0f || laneW_avg > 405.0f) 
+    if(laneW_avg < 380.0f || laneW_avg > 520.0f) 
     {
         current_laneW = LANE_WIDTH_PX;
     }

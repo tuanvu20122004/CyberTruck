@@ -179,6 +179,34 @@ bool PolicyModel::loadFromJson(const std::string& jsonPath, std::string* errorMe
     }
 
     loaded_ = true;
+    action_limit_deg_ = 28.0f;
+    action_limit_mode_ = "none";
+
+    cv::FileNode tsNode = fs["training_summary"];
+    if (!tsNode.empty()) {
+        cv::FileNode optNode = tsNode["optimizer"];
+        if (!optNode.empty()) {
+            cv::FileNode modeNode = optNode["action_limit_mode"];
+            if (!modeNode.empty()) {
+                action_limit_mode_ = static_cast<std::string>(modeNode);
+            }
+
+            cv::FileNode degNode = optNode["action_limit_deg"];
+            if (!degNode.empty()) {
+                action_limit_deg_ = static_cast<float>((double)degNode);
+            }
+        }
+    }
+
+    if (action_limit_mode_ != "none" &&
+        action_limit_mode_ != "tanh" &&
+        action_limit_mode_ != "clamp") {
+        return fail("[PolicyModel] Unsupported action_limit_mode: " + action_limit_mode_);
+    }
+
+    if (!std::isfinite(action_limit_deg_) || action_limit_deg_ <= 0.0f) {
+        action_limit_deg_ = 28.0f;
+    }
     if (errorMessage != nullptr) {
         errorMessage->clear();
     }
@@ -195,12 +223,19 @@ float PolicyModel::activate(float x) const
 
 std::vector<float> PolicyModel::normalize(const FeatureVector& features) const
 {
-    std::vector<float> out(kFeatureDim, 0.0f);
+    std::vector<float> x(kFeatureDim, 0.0f);
+
     for (int i = 0; i < kFeatureDim; ++i) {
-        const float stdv = std::abs(feature_std_[i]) < 1e-8f ? 1.0f : feature_std_[i];
-        out[i] = (features[static_cast<std::size_t>(i)] - feature_mean_[static_cast<std::size_t>(i)]) / stdv;
+        if (std::abs(feature_std_[i]) < 1e-6f) {
+            // Feature gần như hằng số lúc train.
+            // Normalized value nên là 0, không được chia cho std quá nhỏ.
+            x[i] = 0.0f;
+        } else {
+            x[i] = (features[i] - feature_mean_[i]) / feature_std_[i];
+        }
     }
-    return out;
+
+    return x;
 }
 
 std::vector<float> PolicyModel::applyLayer(const Layer& layer,
@@ -218,10 +253,11 @@ std::vector<float> PolicyModel::applyLayer(const Layer& layer,
     return output;
 }
 
-float PolicyModel::infer(const FeatureVector& features) const
+
+float PolicyModel::inferRaw(const FeatureVector& features) const
 {
     if (!loaded_) {
-        throw std::runtime_error("[PolicyModel] infer() called before loadFromJson()");
+        throw std::runtime_error("[PolicyModel] inferRaw() called before loadFromJson()");
     }
 
     std::vector<float> x = normalize(features);
@@ -251,4 +287,28 @@ PolicyModel::FeatureVector PolicyModel::buildFeatures(const MpcState& state,
     f[6] = velocity;
     f[7] = prev_raw_steering;
     return f;
+}
+
+float PolicyModel::inferAction(const FeatureVector& features) const
+{
+    const float u_raw = inferRaw(features);
+    return applyActionLimit(u_raw);
+}
+
+
+float PolicyModel::applyActionLimit(float u_raw_deg) const
+{
+    if (!std::isfinite(u_raw_deg)) {
+        return 0.0f;
+    }
+
+    if (action_limit_mode_ == "tanh") {
+        return action_limit_deg_ * std::tanh(u_raw_deg / action_limit_deg_);
+    }
+
+    if (action_limit_mode_ == "clamp") {
+        return std::clamp(u_raw_deg, -action_limit_deg_, action_limit_deg_);
+    }
+
+    return u_raw_deg;
 }

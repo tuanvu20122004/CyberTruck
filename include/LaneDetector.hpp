@@ -39,6 +39,7 @@ public:
 
     // ===== Getters for MPC =====
     std::vector<cv::Point> getCenterline() const { return centerline; }
+    cv::Mat getmask() const { return mask; }
     bool hasValidLane() const { return has_valid_lane_; }
 
     // ===== Getters for LaneChangePlanner =====
