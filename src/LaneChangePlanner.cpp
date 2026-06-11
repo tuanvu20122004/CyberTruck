@@ -13,7 +13,7 @@ LaneChangePlanner::LaneChangePlanner()
       settle_counter_(0),// số frame cooldown sau khi vừa kết thúc đổi làn
       settle_frames_(12),// số frame khóa đổi ngược ngay sau khi vừa hoàn tất đổi làn
       trigger_distance_(1.1f),// khoảng cách kích hoạt đổi lane, khi obstacle ở khoảng cách này thì planner sẽ bắt đầu cân nhắc đổi lane, giá trị này cần tune thử nghiệm để phù hợp với tốc độ và đặc tính của xe
-      lane_width_m_(0.40f),// Giá trị cần tune lại
+      lane_width_m_(0.35f),// Giá trị cần tune lại
       vehicle_width_m_(0.21f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng của xe mình
       vehicle_length_m_(0.432f),// da tune lại cho phù hợp với kích thước của xe, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều dài của xe mình
       obstacle_width_m_(0.20f),// da tune lại cho phù hợp với kích thước của obstacle, nếu thấy đổi lane sát quá thì tăng thêm, nếu thấy đổi lane quá xa thì giảm bớt đây là chiều rộng ước lượng của obstacle cần tránh, có thể là xe đạp, xe máy hoặc người đi bộ
@@ -249,12 +249,12 @@ LaneChangePlanner::buildStaticObstacle(float obstacle_distance_m) const
 // Ham decision
 bool LaneChangePlanner::canChangeLeft(float distance, bool has_left_lane, LaneLineType left_type) const
 {
-    return (distance <= trigger_distance_) && has_left_lane && left_type == LaneLineType::DASHED;
+    return (distance <= trigger_distance_) && has_left_lane && (left_type == LaneLineType::DASHED);
 }
 // Ham decision
 bool LaneChangePlanner::canChangeRight(float distance, bool has_right_lane, LaneLineType right_type) const
 {
-    return(distance <= trigger_distance_) && has_right_lane && right_type == LaneLineType::DASHED;
+    return(distance <= trigger_distance_) && has_right_lane && (right_type == LaneLineType::DASHED);
 }
 
 // sinh quỹ đạo
@@ -271,9 +271,9 @@ LaneChangePlanner::generateCandidates(
     // giữ lane
     candidates.push_back(makeKeepLaneCandidate(ref));
 
-    // Bộ T phù hợp hơn với vx = 0.08 m/s
+    // Bộ T phù hợp hơn với vx = 0.15 m/s
     static const std::array<float, 5> T_SET = {
-    1.5f, 2.0f, 2.5f, 3.0f, 3.5f
+    0.5f, 1.0f, 1.25f, 1.5f, 2.0f
 };
 
     // đổi lane
@@ -315,7 +315,7 @@ LaneChangePlanner::makeLaneChangeCandidate(
     Candidate c;
     c.target_lane = target_lane;
     c.maneuver_time_s = maneuver_time_s;
-    c.lane_change_distance_m = std::max(0.45f, vx_mps_ * maneuver_time_s);
+    c.lane_change_distance_m = std::max(0.35f, vx_mps_ * maneuver_time_s);
     c.target_offset_m = static_cast<float>(target_lane) * lane_width_m_;
     c.polyline_px = offsetReferenceToPolyline(ref, c);
     c.feasible = (c.polyline_px.size() >= 3);
@@ -501,7 +501,7 @@ LaneChangePlanner::selectBestCandidate(const std::vector<Candidate>& candidates)
         }
     }
 
-    if (latched != nullptr && latched->cost <= best.cost + 7.0f)
+    if (latched != nullptr && latched->cost <= best.cost + 12.0f)
         return *latched;
 
     return best;
@@ -580,6 +580,7 @@ std::vector<cv::Point> LaneChangePlanner::offsetReferenceToPolyline(
 }
 float LaneChangePlanner::lateralOffsetAtS(float s_m, const Candidate& c) const
 {
+    //không đổi làn
     if (c.target_lane == 0 || c.lane_change_distance_m <= 1e-6f)
         return 0.0f;
 

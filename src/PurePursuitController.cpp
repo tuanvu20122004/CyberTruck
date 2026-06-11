@@ -4,9 +4,9 @@
 
 PurePursuitController::PurePursuitController()
     : wheelbase_m_(0.2515f),
-      lookahead_m_(0.37f),
-      pixel_per_meter_(800.0f),
-      rear_axle_offset_px_(400.0f),
+      lookahead_m_(0.29f),
+      pixel_per_meter_(900.0f),
+      rear_axle_offset_px_(540.0f),
       max_steering_deg_(25.0f)
 {
 }

@@ -57,10 +57,10 @@ void bindToCore(int core_id)
 Logic::Logic(const std::string& videoPath)
     : detector(videoPath, 640, 480),
       comm("/dev/ttyACM0", 115200),
-      udp_yolo("192.168.1.101", 9996, 8888),
-      udp_debug("192.168.1.101", 9997)
+      udp_yolo("192.168.1.122", 9996, 8888),
+      udp_debug("192.168.1.122", 9997)
 {
-    mpc.init(1000.0f, 50.0f, 5.0f);
+    mpc.init(2300.0f, 140.0f, 11.0f);
     mpc.debugMatrices();
 
     mpc.setVehicleParams(0.2515f, 2.3f, 0.132f, 0.12f, 0.04f, 0.02f, 0.04f);
@@ -361,7 +361,7 @@ void Logic::run()
                     else
                     {
                         // Pure Pursuit 
-                        steering = 0.02f * std::pow(steering, 3) + 1.2f * steering;
+                        steering = steering;
                     }
 
                     if (steering <= -25.0f) steering = -25.0f;
